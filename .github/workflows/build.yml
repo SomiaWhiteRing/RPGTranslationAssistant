@@ -41,6 +41,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install pyinstaller
           pip install -r requirements.txt
 
       - name: Create directory structure
@@ -73,16 +74,16 @@ jobs:
             mkdir -p dist/RPGTranslationAssistant/RTPCollection
           }
 
-      - name: Direct PyInstaller Build
+      - name: Build with build_exe.py
         run: |
-          # 直接使用PyInstaller进行构建，确保_internal目录结构
-          pyinstaller --name=RPGTranslationAssistant `
-            --windowed `
-            --clean `
-            --distpath=dist/RPGTranslationAssistant `
-            --workpath=build `
-            --specpath=build `
-            RPGTranslationAssistant.py
+          # 确保构建脚本中的中文能够正确显示
+          chcp 65001
+          # 使用build_exe.py脚本构建，确保与本地构建一致
+          python build_exe.py
+          
+          # 查看构建后的目录结构
+          echo "构建后的目录结构:"
+          dir dist -Recurse | Select-Object -First 20
 
       - name: Create release zip
         run: |
