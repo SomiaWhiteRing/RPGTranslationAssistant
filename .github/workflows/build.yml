@@ -32,40 +32,62 @@ jobs:
           pip install pyinstaller
           pip install -r requirements.txt
 
+      - name: Debug repository content
+        run: |
+          echo "列出仓库根目录:"
+          dir
+          echo "检查是否存在关键目录:"
+          if (Test-Path -Path "RPGRewriter") { echo "RPGRewriter 存在" } else { echo "RPGRewriter 不存在" }
+          if (Test-Path -Path "EasyRPG") { echo "EasyRPG 存在" } else { echo "EasyRPG 不存在" }
+          if (Test-Path -Path "RTPCollection") { echo "RTPCollection 存在" } else { echo "RTPCollection 不存在" }
+
       - name: Create directory structure
         run: |
-          mkdir -p dist
           mkdir -p dist/RPGTranslationAssistant
           mkdir -p dist/RPGTranslationAssistant/Works
           
-          # 检查必要的目录是否存在
+          # 确保复制依赖目录，如果不存在则创建空目录
+          # 使用适当的错误处理以确保这些命令不会失败
           if (Test-Path -Path "RPGRewriter") {
-            echo "::notice::RPGRewriter directory found"
+            echo "复制 RPGRewriter 目录..."
             xcopy /E /I /Y RPGRewriter dist\RPGTranslationAssistant\RPGRewriter
           } else {
-            echo "::warning::RPGRewriter directory not found, creating empty directory"
+            echo "创建空的 RPGRewriter 目录..."
             mkdir -p dist/RPGTranslationAssistant/RPGRewriter
           }
           
           if (Test-Path -Path "EasyRPG") {
-            echo "::notice::EasyRPG directory found"
+            echo "复制 EasyRPG 目录..."
             xcopy /E /I /Y EasyRPG dist\RPGTranslationAssistant\EasyRPG
           } else {
-            echo "::warning::EasyRPG directory not found, creating empty directory"
+            echo "创建空的 EasyRPG 目录..."
             mkdir -p dist/RPGTranslationAssistant/EasyRPG
           }
           
           if (Test-Path -Path "RTPCollection") {
-            echo "::notice::RTPCollection directory found"
+            echo "复制 RTPCollection 目录..."
             xcopy /E /I /Y RTPCollection dist\RPGTranslationAssistant\RTPCollection
           } else {
-            echo "::warning::RTPCollection directory not found, creating empty directory"
+            echo "创建空的 RTPCollection 目录..."
             mkdir -p dist/RPGTranslationAssistant/RTPCollection
           }
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --name RPGTranslationAssistant --noconfirm --clean --onedir --windowed RPGTranslationAssistant.py
+          # 使用更明确的配置，确保依赖被正确组织
+          pyinstaller --name RPGTranslationAssistant `
+            --noconfirm `
+            --clean `
+            --onedir `
+            --windowed `
+            --distpath dist/RPGTranslationAssistant `
+            --workpath build `
+            --specpath build `
+            RPGTranslationAssistant.py
+            
+          # 移动PyInstaller生成的文件到正确位置
+          Move-Item -Path dist\RPGTranslationAssistant\RPGTranslationAssistant\* -Destination dist\RPGTranslationAssistant\ -Force
+          Remove-Item -Path dist\RPGTranslationAssistant\RPGTranslationAssistant -Recurse -Force
 
       - name: Create release zip
         run: |
@@ -77,8 +99,12 @@ jobs:
           Set-Content -Path dist\RPGTranslationAssistant\version.txt -Value "版本：$VERSION`n发布日期：$(Get-Date -Format 'yyyy-MM-dd')"
           
           # 复制其他必要文件
-          Copy-Item LICENSE dist\RPGTranslationAssistant\
-          Copy-Item README.md dist\RPGTranslationAssistant\
+          Copy-Item LICENSE dist\RPGTranslationAssistant\ -ErrorAction SilentlyContinue
+          Copy-Item README.md dist\RPGTranslationAssistant\ -ErrorAction SilentlyContinue
+          
+          # 列出最终文件结构以进行调试
+          echo "最终打包结构:"
+          dir dist\RPGTranslationAssistant\ -Recurse | Select-Object FullName | Format-Table -Wrap
           
           # 创建zip文件
           Compress-Archive -Path dist\RPGTranslationAssistant\* -DestinationPath release.zip -Force
