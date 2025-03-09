@@ -5,6 +5,12 @@ on:
     tags:
       - 'v*'  # 当推送新的版本标签时触发
 
+# 添加权限配置
+permissions:
+  contents: write
+  packages: write
+  discussions: write
+
 jobs:
   build:
     runs-on: windows-latest
