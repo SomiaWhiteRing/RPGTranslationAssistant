@@ -78,7 +78,6 @@ jobs:
           pyinstaller --name RPGTranslationAssistant `
             --noconfirm `
             --clean `
-            --onedir `
             --windowed `
             --distpath dist/RPGTranslationAssistant `
             --workpath build `
