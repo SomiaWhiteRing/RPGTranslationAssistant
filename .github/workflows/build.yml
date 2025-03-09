@@ -63,10 +63,6 @@ jobs:
         run: |
           pyinstaller --name RPGTranslationAssistant --noconfirm --clean --onedir --windowed RPGTranslationAssistant.py
 
-      - name: Copy executable
-        run: |
-          xcopy /Y dist\RPGTranslationAssistant\*.* dist\RPGTranslationAssistant\
-
       - name: Create release zip
         run: |
           # 获取标签版本号
