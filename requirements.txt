@@ -1,0 +1,4 @@
+pyinstaller==5.13.0
+tkinter
+python-json
+pathlib 
