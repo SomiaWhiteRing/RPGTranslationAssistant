@@ -40,6 +40,7 @@ jobs:
           if (Test-Path -Path "RPGRewriter") { echo "RPGRewriter 存在" } else { echo "RPGRewriter 不存在" }
           if (Test-Path -Path "EasyRPG") { echo "EasyRPG 存在" } else { echo "EasyRPG 不存在" }
           if (Test-Path -Path "RTPCollection") { echo "RTPCollection 存在" } else { echo "RTPCollection 不存在" }
+          if (Test-Path -Path "build_exe.py") { echo "build_exe.py 存在" } else { echo "build_exe.py 不存在" }
 
       - name: Create directory structure
         run: |
@@ -72,21 +73,20 @@ jobs:
             mkdir -p dist/RPGTranslationAssistant/RTPCollection
           }
 
-      - name: Build with PyInstaller
+      - name: Build with build_exe.py
         run: |
-          # 使用更明确的配置，确保依赖被正确组织
-          pyinstaller --name RPGTranslationAssistant `
-            --noconfirm `
-            --clean `
-            --windowed `
-            --distpath dist/RPGTranslationAssistant `
-            --workpath build `
-            --specpath build `
-            RPGTranslationAssistant.py
-            
-          # 移动PyInstaller生成的文件到正确位置
-          Move-Item -Path dist\RPGTranslationAssistant\RPGTranslationAssistant\* -Destination dist\RPGTranslationAssistant\ -Force
-          Remove-Item -Path dist\RPGTranslationAssistant\RPGTranslationAssistant -Recurse -Force
+          # 使用build_exe.py脚本构建，确保与本地构建一致
+          python build_exe.py
+          
+          # 如果build_exe.py将文件输出到其他位置，可能需要移动文件到预期位置
+          # 检查输出目录是否是dist/RPGTranslationAssistant
+          if (-not (Test-Path -Path "dist/RPGTranslationAssistant")) {
+            echo "移动构建输出到正确位置..."
+            # 可能需要根据build_exe.py的实际输出位置调整此处
+            if (Test-Path -Path "dist") {
+              xcopy /E /I /Y dist\* dist\RPGTranslationAssistant\
+            }
+          }
 
       - name: Create release zip
         run: |
