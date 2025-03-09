@@ -41,29 +41,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller
+          pip install pyinstaller==6.5.0
           pip install -r requirements.txt
-      
-      - name: Debug PyInstaller version
-        run: |
-          # 检查PyInstaller版本
-          python -c "import PyInstaller; print(f'PyInstaller 版本: {PyInstaller.__version__}')"
-          # 如果可能，显示build_exe.py的内容
-          if (Test-Path -Path "build_exe.py") {
-            echo "====== build_exe.py 内容预览 ======"
-            Get-Content -Path "build_exe.py" | Select-Object -First 30
-            echo "==================================="
-          }
-
-      - name: Debug repository content
-        run: |
-          echo "列出仓库根目录:"
-          dir
-          echo "检查是否存在关键目录:"
-          if (Test-Path -Path "RPGRewriter") { echo "RPGRewriter 存在" } else { echo "RPGRewriter 不存在" }
-          if (Test-Path -Path "EasyRPG") { echo "EasyRPG 存在" } else { echo "EasyRPG 不存在" }
-          if (Test-Path -Path "RTPCollection") { echo "RTPCollection 存在" } else { echo "RTPCollection 不存在" }
-          if (Test-Path -Path "build_exe.py") { echo "build_exe.py 存在" } else { echo "build_exe.py 不存在" }
 
       - name: Create directory structure
         run: |
@@ -71,7 +50,6 @@ jobs:
           mkdir -p dist/RPGTranslationAssistant/Works
           
           # 确保复制依赖目录，如果不存在则创建空目录
-          # 使用适当的错误处理以确保这些命令不会失败
           if (Test-Path -Path "RPGRewriter") {
             echo "复制 RPGRewriter 目录..."
             xcopy /E /I /Y RPGRewriter dist\RPGTranslationAssistant\RPGRewriter
@@ -96,66 +74,17 @@ jobs:
             mkdir -p dist/RPGTranslationAssistant/RTPCollection
           }
 
-      - name: Build with build_exe.py
+      - name: Direct PyInstaller Build
         run: |
-          # 确保构建脚本中的中文能够正确显示
-          chcp 65001
-          
-          # 先尝试检查build_exe.py中是否有--onedir或--onefile参数
-          $buildContent = Get-Content -Path "build_exe.py" -Raw
-          echo "检查build_exe.py中的关键参数..."
-          if ($buildContent -match "--onefile") {
-            echo "检测到--onefile参数，应该会生成单个EXE文件"
-          } elseif ($buildContent -match "--onedir") {
-            echo "检测到--onedir参数，应该会生成目录结构"
-          } else {
-            echo "未检测到明确的打包模式参数"
-          }
-          
-          # 使用build_exe.py脚本构建，确保与本地构建一致
-          python build_exe.py
-          
-          # 查看构建脚本执行后的目录结构
-          echo "构建后目录结构:"
-          dir dist -Recurse | Select-Object -First 20
-
-      - name: Fix directory structure if needed
-        run: |
-          # 查看dist目录中的结构，检查是否存在_internal目录
-          $hasInternalDir = Test-Path -Path "dist/RPGTranslationAssistant/_internal"
-          $hasExeFile = Test-Path -Path "dist/RPGTranslationAssistant/RPGTranslationAssistant.exe"
-          
-          echo "检查打包结构..."
-          echo "存在_internal目录: $hasInternalDir"
-          echo "存在EXE文件: $hasExeFile"
-          
-          # 如果没有_internal目录，但有散落的依赖文件，尝试创建结构
-          if (-not $hasInternalDir -and $hasExeFile) {
-            echo "尝试修复目录结构..."
-            # 创建_internal目录
-            mkdir -p dist/RPGTranslationAssistant/_internal
-            
-            # 移动所有DLL和PYD文件到_internal目录
-            echo "移动依赖文件到_internal目录..."
-            Get-ChildItem -Path "dist/RPGTranslationAssistant" -Include "*.dll", "*.pyd", "*.zip", "tcl*", "tk*" -Exclude "RPGTranslationAssistant.exe" | 
-            ForEach-Object {
-              if (-not ($_.Name -match "^(EasyRPG|RPGRewriter|RTPCollection|Works)$")) {
-                Move-Item -Path $_.FullName -Destination "dist/RPGTranslationAssistant/_internal/" -Force
-              }
-            }
-            
-            # 移动其他目录到_internal (除了已知的目录)
-            Get-ChildItem -Path "dist/RPGTranslationAssistant" -Directory | 
-            ForEach-Object {
-              if (-not ($_.Name -match "^(EasyRPG|RPGRewriter|RTPCollection|Works|_internal)$")) {
-                Move-Item -Path $_.FullName -Destination "dist/RPGTranslationAssistant/_internal/" -Force
-              }
-            }
-          }
-      
-          # 再次检查结构
-          echo "修复后的目录结构:"
-          dir dist/RPGTranslationAssistant -Recurse | Select-Object -First 20
+          # 直接使用PyInstaller进行构建，确保_internal目录结构
+          pyinstaller --name=RPGTranslationAssistant `
+            --windowed `
+            --clean `
+            --distpath=dist/RPGTranslationAssistant `
+            --workpath=build `
+            --specpath=build `
+            --contents-directory=_internal `
+            RPGTranslationAssistant.py
 
       - name: Create release zip
         run: |
@@ -170,7 +99,7 @@ jobs:
           Copy-Item LICENSE dist\RPGTranslationAssistant\ -ErrorAction SilentlyContinue
           Copy-Item README.md dist\RPGTranslationAssistant\ -ErrorAction SilentlyContinue
           
-          # 列出最终文件结构以进行调试
+          # 列出最终文件结构
           echo "最终打包结构:"
           dir dist\RPGTranslationAssistant\ -Recurse | Select-Object FullName | Format-Table -Wrap
           
