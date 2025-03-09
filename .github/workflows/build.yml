@@ -11,6 +11,10 @@ permissions:
   packages: write
   discussions: write
 
+# 设置全局环境变量，确保UTF-8编码支持
+env:
+  PYTHONIOENCODING: utf-8
+
 jobs:
   build:
     runs-on: windows-latest
@@ -25,6 +29,14 @@ jobs:
         with:
           python-version: '3.9'
           cache: pip
+
+      - name: Set UTF-8 Environment
+        run: |
+          # 设置控制台代码页为UTF-8
+          chcp 65001
+          # 显示当前编码设置
+          echo "当前代码页设置为UTF-8"
+          echo "PYTHONIOENCODING=$env:PYTHONIOENCODING"
 
       - name: Install dependencies
         run: |
@@ -75,6 +87,8 @@ jobs:
 
       - name: Build with build_exe.py
         run: |
+          # 确保构建脚本中的中文能够正确显示
+          chcp 65001
           # 使用build_exe.py脚本构建，确保与本地构建一致
           python build_exe.py
           
