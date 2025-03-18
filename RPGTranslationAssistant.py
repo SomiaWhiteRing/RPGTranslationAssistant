@@ -8,6 +8,8 @@ import json
 import re
 from pathlib import Path
 import datetime
+import threading
+import queue
 
 class RPGTranslationAssistant:
     def __init__(self, root):
@@ -40,8 +42,15 @@ class RPGTranslationAssistant:
         self.rtp_2003 = tk.BooleanVar(value=False)
         self.rtp_2003steam = tk.BooleanVar(value=False)
         
+        # 用于线程间通信
+        self.message_queue = queue.Queue()
+        self.is_processing = False
+        
         self.create_ui()
         self.log("程序已启动，请选择游戏目录")
+        
+        # 启动消息处理器
+        self.root.after(100, self.process_messages)
     
     def create_ui(self):
         # 创建主框架
@@ -213,19 +222,85 @@ class RPGTranslationAssistant:
             
         return True
         
+    def process_messages(self):
+        """处理来自工作线程的消息"""
+        try:
+            while True:
+                message = self.message_queue.get_nowait()
+                message_type, content = message
+                
+                if message_type == "log":
+                    level, text = content
+                    self.log(text, level)
+                elif message_type == "status":
+                    self.status_var.set(content)
+                elif message_type == "success":
+                    self.show_success(content)
+                elif message_type == "error":
+                    self.show_error(content)
+                elif message_type == "done":
+                    self.is_processing = False
+                
+                self.message_queue.task_done()
+        except queue.Empty:
+            pass
+        
+        # 继续轮询消息队列
+        self.root.after(100, self.process_messages)
+    
+    def thread_log(self, message, level="normal"):
+        """从工作线程发送日志消息"""
+        self.message_queue.put(("log", (level, message)))
+    
+    def thread_update_status(self, message):
+        """从工作线程更新状态"""
+        self.message_queue.put(("status", message))
+    
+    def thread_show_success(self, message):
+        """从工作线程显示成功消息"""
+        self.message_queue.put(("success", message))
+    
+    def thread_show_error(self, message):
+        """从工作线程显示错误消息"""
+        self.message_queue.put(("error", message))
+        
+    def run_in_thread(self, target_func, *args, **kwargs):
+        """在单独的线程中运行函数"""
+        if self.is_processing:
+            self.log("请等待当前操作完成", "error")
+            return
+            
+        self.is_processing = True
+        
+        def wrapper():
+            try:
+                target_func(*args, **kwargs)
+            except Exception as e:
+                self.message_queue.put(("error", f"操作过程中出错: {str(e)}"))
+            finally:
+                self.message_queue.put(("done", None))
+                
+        thread = threading.Thread(target=wrapper)
+        thread.daemon = True
+        thread.start()
+    
     def initialize_game(self):
         if not self.check_game_path():
             return
-            
+        
+        self.run_in_thread(self._initialize_game)
+    
+    def _initialize_game(self):
+        """实际执行初始化的线程函数"""
         game_path = self.game_path.get()
-        self.update_status("正在初始化...")
+        self.thread_update_status("正在初始化...")
         
         try:
             # 复制EasyRPG到游戏目录
             copied_files = 0
             skipped_files = 0
             
-            self.log("正在复制EasyRPG文件...")
+            self.thread_log("正在复制EasyRPG文件...")
             for item in os.listdir(self.easyrpg_path):
                 src = os.path.join(self.easyrpg_path, item)
                 dst = os.path.join(game_path, item)
@@ -236,17 +311,17 @@ class RPGTranslationAssistant:
                     else:
                         skipped_files += 1
             
-            self.log(f"EasyRPG文件复制完成: 复制 {copied_files} 个文件，跳过 {skipped_files} 个已存在文件")
+            self.thread_log(f"EasyRPG文件复制完成: 复制 {copied_files} 个文件，跳过 {skipped_files} 个已存在文件")
                         
             # 解压选择的RTP文件到游戏目录
-            self.log("正在处理RTP文件...")
+            self.thread_log("正在处理RTP文件...")
             
             import zipfile
             import tempfile
             
             # 检查至少选择了一个RTP
             if not (self.rtp_2000.get() or self.rtp_2000en.get() or self.rtp_2003.get() or self.rtp_2003steam.get()):
-                self.log("警告: 未选择任何RTP文件", "error")
+                self.thread_log("警告: 未选择任何RTP文件", "error")
             
             # 定义要处理的RTP文件
             rtp_files = []
@@ -263,7 +338,7 @@ class RPGTranslationAssistant:
             for rtp_file in rtp_files:
                 rtp_path = os.path.join(self.rtpcollection_path, rtp_file)
                 if os.path.exists(rtp_path):
-                    self.log(f"正在解压 {rtp_file}...")
+                    self.thread_log(f"正在解压 {rtp_file}...")
                     
                     rtp_copied = 0
                     rtp_skipped = 0
@@ -271,14 +346,14 @@ class RPGTranslationAssistant:
                     try:
                         # 创建临时目录进行解压
                         with tempfile.TemporaryDirectory() as temp_dir:
-                            self.log(f"创建临时目录: {temp_dir}")
+                            self.thread_log(f"创建临时目录: {temp_dir}")
                             
                             # 解压到临时目录
                             with zipfile.ZipFile(rtp_path, 'r') as zip_ref:
                                 zip_ref.extractall(temp_dir)
                                 
                             # 从临时目录复制到游戏目录
-                            self.log(f"从临时目录复制文件到游戏目录...")
+                            self.thread_log(f"从临时目录复制文件到游戏目录...")
                             
                             # 遍历临时目录中的所有文件
                             for root, dirs, files in os.walk(temp_dir):
@@ -305,16 +380,16 @@ class RPGTranslationAssistant:
                                         shutil.copy2(src_file, dst_file)
                                         rtp_copied += 1
                                     except Exception as e:
-                                        self.log(f"复制文件失败: {src_file} -> {dst_file}: {str(e)}", "error")
+                                        self.thread_log(f"复制文件失败: {src_file} -> {dst_file}: {str(e)}", "error")
                         
-                        self.log(f"{rtp_file} 处理完成: 复制 {rtp_copied} 个文件，跳过 {rtp_skipped} 个已存在文件")
+                        self.thread_log(f"{rtp_file} 处理完成: 复制 {rtp_copied} 个文件，跳过 {rtp_skipped} 个已存在文件")
                     except Exception as e:
-                        self.log(f"解压 {rtp_file} 时出错: {str(e)}", "error")
+                        self.thread_log(f"解压 {rtp_file} 时出错: {str(e)}", "error")
                 else:
-                    self.log(f"找不到RTP文件: {rtp_file}", "error")
+                    self.thread_log(f"找不到RTP文件: {rtp_file}", "error")
             
             # 转换文本文件编码
-            self.log("正在转换文本文件编码...")
+            self.thread_log("正在转换文本文件编码...")
             converted_files = 0
             skipped_conversions = 0
             failed_conversions = 0
@@ -327,7 +402,7 @@ class RPGTranslationAssistant:
                         with open(file_path, 'r', encoding='utf-8') as file:
                             content = file.read()
                             # 如果能正常读取为UTF-8，认为文件已经转换过
-                            self.log(f"跳过已是UTF-8的文件: {item}")
+                            self.thread_log(f"跳过已是UTF-8的文件: {item}")
                             skipped_conversions += 1
                             continue
                     except UnicodeDecodeError:
@@ -347,7 +422,7 @@ class RPGTranslationAssistant:
                             with open(file_path, 'w', encoding='utf-8') as file:
                                 file.write(content)
                                 
-                            self.log(f"成功转换文件: {item} ({encoding} -> UTF-8)")
+                            self.thread_log(f"成功转换文件: {item} ({encoding} -> UTF-8)")
                             converted = True
                             converted_files += 1
                             break
@@ -356,36 +431,40 @@ class RPGTranslationAssistant:
                             continue
                             
                     if not converted:
-                        self.log(f"转换文件失败: {item}", "error")
+                        self.thread_log(f"转换文件失败: {item}", "error")
                         failed_conversions += 1
             
             # 编码转换统计
-            self.log(f"编码转换完成: 转换 {converted_files} 个文件，跳过 {skipped_conversions} 个已是UTF-8的文件，失败 {failed_conversions} 个文件")
+            self.thread_log(f"编码转换完成: 转换 {converted_files} 个文件，跳过 {skipped_conversions} 个已是UTF-8的文件，失败 {failed_conversions} 个文件")
             
-            self.update_status("初始化完成")
-            self.show_success(f"游戏初始化完成")
+            self.thread_update_status("初始化完成")
+            self.thread_show_success(f"游戏初始化完成")
             
         except Exception as e:
-            self.update_status("初始化过程中出错")
-            self.show_error(f"初始化过程中出错: {str(e)}")
+            self.thread_update_status("初始化过程中出错")
+            self.thread_show_error(f"初始化过程中出错: {str(e)}")
             
     def rename_files(self):
         if not self.check_game_path():
             return
             
+        self.run_in_thread(self._rename_files)
+    
+    def _rename_files(self):
+        """实际执行文件重命名的线程函数"""
         game_path = self.game_path.get()
-        self.update_status("正在处理文件名...")
+        self.thread_update_status("正在处理文件名...")
         
         try:
             # 生成文件列表
             lmt_path = os.path.join(game_path, "RPG_RT.lmt")
             filelist_cmd = [self.rpgrewriter_path, lmt_path, "-F", "Y"]
-            self.log(f"执行命令: {' '.join(filelist_cmd)}")
+            self.thread_log(f"执行命令: {' '.join(filelist_cmd)}")
             
             # 执行命令并捕获输出
             process = subprocess.run(filelist_cmd, capture_output=True, text=True, check=True)
             if process.stdout:
-                self.log("命令输出: " + process.stdout.strip())
+                self.thread_log("命令输出: " + process.stdout.strip())
             
             # 读取生成的filelist.txt文件
             filelist_path = os.path.join(self.program_dir, "filelist.txt")
@@ -426,7 +505,7 @@ class RPGTranslationAssistant:
                         # 替换"___"行
                         lines[line_num] = unicode_name
                         
-                        self.log(f"转换文件名: {original_name} -> {unicode_name}")
+                        self.thread_log(f"转换文件名: {original_name} -> {unicode_name}")
                         converted_count += 1
                     else:
                         # 如果是ASCII文件名，直接使用原名替换
@@ -437,33 +516,33 @@ class RPGTranslationAssistant:
             with open(input_path, 'w', encoding='utf-8') as file:
                 file.write('\n'.join(lines))
             
-            self.log(f"已生成input.txt文件，共转换 {converted_count} 个非ASCII文件名")
+            self.thread_log(f"已生成input.txt文件，共转换 {converted_count} 个非ASCII文件名")
             
             # 应用重写 - 拆分为两个步骤
-            self.log("第1步: 重写文件名 - 正在执行重命名...")
+            self.thread_log("第1步: 重写文件名 - 正在执行重命名...")
             
             # 使用 subprocess.run 简单调用文件重命名功能
             rename_cmd = [self.rpgrewriter_path, lmt_path, "-V"]  # 只重命名资源文件
-            self.log(f"执行命令: {' '.join(rename_cmd)}")
+            self.thread_log(f"执行命令: {' '.join(rename_cmd)}")
             
             rename_result = subprocess.run(rename_cmd, capture_output=True, text=True)
             if rename_result.stdout:
-                self.log("命令输出: " + rename_result.stdout.strip())
+                self.thread_log("命令输出: " + rename_result.stdout.strip())
             if rename_result.stderr:
-                self.log("命令错误: " + rename_result.stderr.strip(), "error")
+                self.thread_log("命令错误: " + rename_result.stderr.strip(), "error")
             
             if rename_result.returncode != 0:
-                self.log(f"文件重命名失败，返回代码: {rename_result.returncode}", "error")
+                self.thread_log(f"文件重命名失败，返回代码: {rename_result.returncode}", "error")
                 raise Exception(f"文件重命名失败，返回代码: {rename_result.returncode}")
                 
-            self.log("第2步: 重写文件名 - 正在重写游戏数据...")
+            self.thread_log("第2步: 重写文件名 - 正在重写游戏数据...")
             
             # 生成一个不需要Y/N回答的日志文件名
-            log_filename = "renames_log.txt" if self.write_log_var.get() else "null"
+            log_filename = "renames_log" if self.write_log_var.get() else "null"
             
             # 重写数据文件，使用管道方式处理可能的交互式提示
             rewrite_cmd = [self.rpgrewriter_path, lmt_path, "-rewrite", "-all", "-log", log_filename]
-            self.log(f"执行命令: {' '.join(rewrite_cmd)}")
+            self.thread_log(f"执行命令: {' '.join(rewrite_cmd)}")
             
             # 使用Popen代替run，这样可以处理交互式提示
             process = subprocess.Popen(
@@ -478,16 +557,16 @@ class RPGTranslationAssistant:
             stdout, stderr = process.communicate(input="Y\n")
             
             if stdout:
-                self.log("命令输出: " + stdout.strip())
+                self.thread_log("命令输出: " + stdout.strip())
             if stderr:
-                self.log("命令错误: " + stderr.strip(), "error")
+                self.thread_log("命令错误: " + stderr.strip(), "error")
             
             if process.returncode != 0:
-                self.log(f"数据重写失败，返回代码: {process.returncode}", "error")
+                self.thread_log(f"数据重写失败，返回代码: {process.returncode}", "error")
                 raise Exception(f"数据重写失败，返回代码: {process.returncode}")
             
-            self.update_status("文件名重写完成")
-            self.show_success("文件名重写完成")
+            self.thread_update_status("文件名重写完成")
+            self.thread_show_success("文件名重写完成")
             
             # 如果生成了日志文件，显示信息
             if self.write_log_var.get():
@@ -497,31 +576,97 @@ class RPGTranslationAssistant:
                         log_content = file.read()
                     
                     missing_count = log_content.count('\n')
-                    self.log(f"有 {missing_count} 个文件名未找到翻译，详见{log_filename}")
+                    self.thread_log(f"有 {missing_count} 个文件名未找到翻译，详见{log_filename}")
                 
         except Exception as e:
-            self.update_status("文件名重写过程中出错")
-            self.show_error(f"文件名重写过程中出错: {str(e)}")
+            self.thread_update_status("文件名重写过程中出错")
+            self.thread_show_error(f"文件名重写过程中出错: {str(e)}")
             
     def export_text(self):
         if not self.check_game_path():
             return
             
+        self.run_in_thread(self._export_text)
+    
+    def _export_text(self):
+        """实际执行文本导出的线程函数"""
         game_path = self.game_path.get()
         encoding = self.export_encoding.get().split(' - ')[-1]
-        self.update_status(f"正在导出文本 (编码: {encoding})...")
+        self.thread_update_status(f"正在导出文本 (编码: {encoding})...")
         
         try:
-            # 设置编码
+            # 设置临时目录来存储有问题的文件
+            temp_dir = os.path.join(game_path, "_temp_problem_files")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # 跟踪有问题的文件
+            problem_files = []
+            
+            # 获取lmt路径
             lmt_path = os.path.join(game_path, "RPG_RT.lmt")
-            export_cmd = [
-                self.rpgrewriter_path,
-                lmt_path,
-                "-export",
-                "-readcode", encoding
-            ]
-            self.log(f"执行命令: {' '.join(export_cmd)}")
-            subprocess.run(export_cmd, check=True)
+            
+            # 尝试导出，如果有文件出现问题则移动它们
+            export_successful = False
+            max_attempts = 50  # 防止无限循环
+            attempts = 0
+            
+            while not export_successful and attempts < max_attempts:
+                attempts += 1
+                export_cmd = [
+                    self.rpgrewriter_path,
+                    lmt_path,
+                    "-export",
+                    "-readcode", encoding
+                ]
+                self.thread_log(f"导出尝试 #{attempts}，执行命令: {' '.join(export_cmd)}")
+                
+                process = subprocess.Popen(
+                    export_cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                stdout, stderr = process.communicate()
+                
+                if stdout:
+                    self.thread_log("命令输出: " + stdout.strip())
+                if stderr:
+                    self.thread_log("命令错误: " + stderr.strip(), "error")
+                
+                if process.returncode == 0:
+                    export_successful = True
+                    self.thread_log("导出成功完成！")
+                else:
+                    # 查找错误发生在哪个文件上
+                    # 使用英文部分关键词检测，确保多语言可用性
+                    if "IndexOutOfRange" in stderr or "OutOfRange" in stderr:
+                        # 从输出中找出最后处理的地图
+                        map_pattern = r"Extracting (Map\d+\.lmu)"
+                        maps = re.findall(map_pattern, stdout)
+                        if maps:
+                            # 问题文件是最后处理的地图文件本身，而不是下一个
+                            last_map = maps[-1]
+                            problem_map = last_map
+                            
+                            # 检查这个地图文件是否存在
+                            problem_map_path = os.path.join(game_path, problem_map)
+                            if os.path.exists(problem_map_path):
+                                # 移动到临时目录
+                                shutil.move(problem_map_path, os.path.join(temp_dir, problem_map))
+                                problem_files.append(problem_map)
+                                self.thread_log(f"检测到问题文件: {problem_map}，已移动到临时目录", "error")
+                                # 继续尝试导出
+                                continue
+                        
+                        # 如果无法确定具体是哪个地图文件有问题，退出循环
+                        self.thread_log("无法确定具体是哪个文件有问题，停止尝试", "error")
+                        break
+                    else:
+                        # 其他错误，退出循环
+                        self.thread_log("遇到未知错误，停止尝试", "error")
+                        break
             
             # 检查StringScripts文件夹是否已创建
             string_scripts_path = os.path.join(game_path, "StringScripts")
@@ -531,15 +676,48 @@ class RPGTranslationAssistant:
                 for root, dirs, files in os.walk(string_scripts_path):
                     file_count += len(files)
                 
-                self.update_status("文本导出完成")
-                self.show_success(f"文本已导出到StringScripts文件夹，共 {file_count} 个文件")
+                self.thread_update_status("文本导出完成")
+                
+                # 将有问题的文件移回原位置
+                for file in problem_files:
+                    source = os.path.join(temp_dir, file)
+                    if os.path.exists(source):
+                        destination = os.path.join(game_path, file)
+                        shutil.move(source, destination)
+                        self.thread_log(f"已将问题文件 {file} 移回原位置")
+                
+                # 移除临时目录（如果为空）
+                if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                    os.rmdir(temp_dir)
+                
+                # 最终报告
+                if problem_files:
+                    self.thread_show_success(f"文本导出部分完成，共 {file_count} 个文件。有 {len(problem_files)} 个地图文件未能导出: {', '.join(problem_files)}")
+                else:
+                    self.thread_show_success(f"文本导出完成，共 {file_count} 个文件")
             else:
-                self.update_status("文本导出完成")
-                self.show_success("文本已导出到StringScripts文件夹")
+                self.thread_update_status("文本导出失败")
+                self.thread_show_error("未能创建StringScripts文件夹")
             
         except Exception as e:
-            self.update_status("文本导出过程中出错")
-            self.show_error(f"文本导出过程中出错: {str(e)}")
+            self.thread_update_status("文本导出过程中出错")
+            self.thread_show_error(f"文本导出过程中出错: {str(e)}")
+            
+            # 确保临时目录中的文件移回原位置
+            try:
+                temp_dir = os.path.join(game_path, "_temp_problem_files")
+                if os.path.exists(temp_dir):
+                    for file in os.listdir(temp_dir):
+                        source = os.path.join(temp_dir, file)
+                        destination = os.path.join(game_path, file)
+                        shutil.move(source, destination)
+                        self.thread_log(f"已将文件 {file} 移回原位置")
+                
+                    # 移除临时目录
+                    if not os.listdir(temp_dir):
+                        os.rmdir(temp_dir)
+            except Exception as e2:
+                self.thread_log(f"恢复文件时出错: {str(e2)}", "error")
             
     def process_file(self, file_path):
         result = {}
@@ -576,14 +754,18 @@ class RPGTranslationAssistant:
         if not self.check_game_path():
             return
             
+        self.run_in_thread(self._create_mtool_files)
+    
+    def _create_mtool_files(self):
+        """实际执行创建JSON文件的线程函数"""
         game_path = self.game_path.get()
         string_scripts_path = os.path.join(game_path, "StringScripts")
         
         if not os.path.exists(string_scripts_path):
-            self.show_error("未找到StringScripts文件夹，请先导出文本")
+            self.thread_show_error("未找到StringScripts文件夹，请先导出文本")
             return
             
-        self.update_status("正在创建JSON文件...")
+        self.thread_update_status("正在创建JSON文件...")
         
         try:
             # 获取游戏文件夹名称
@@ -596,13 +778,13 @@ class RPGTranslationAssistant:
             
             if not os.path.exists(work_game_dir):
                 os.makedirs(work_game_dir)
-                self.log(f"创建目录: {game_folder_name}")
+                self.thread_log(f"创建目录: {game_folder_name}")
             if not os.path.exists(untranslated_dir):
                 os.makedirs(untranslated_dir)
-                self.log(f"创建目录: {game_folder_name}/untranslated")
+                self.thread_log(f"创建目录: {game_folder_name}/untranslated")
             if not os.path.exists(translated_dir):
                 os.makedirs(translated_dir)
-                self.log(f"创建目录: {game_folder_name}/translated")
+                self.thread_log(f"创建目录: {game_folder_name}/translated")
                 
             # 处理所有txt文件
             all_results = {}
@@ -618,19 +800,19 @@ class RPGTranslationAssistant:
                         file_count += 1
                         string_count += len(file_results)
                         
-            self.log(f"已处理 {file_count} 个文件，提取 {string_count} 个字符串")
+            self.thread_log(f"已处理 {file_count} 个文件，提取 {string_count} 个字符串")
             
             # 保存未翻译的JSON文件
             json_path = os.path.join(untranslated_dir, "translation.json")
             with open(json_path, 'w', encoding='utf-8') as json_file:
                 json.dump(all_results, json_file, ensure_ascii=False, indent=4)
                 
-            self.update_status("JSON文件创建完成")
-            self.show_success(f"JSON文件已创建在 {untranslated_dir}，共 {string_count} 个字符串")
+            self.thread_update_status("JSON文件创建完成")
+            self.thread_show_success(f"JSON文件已创建在 {untranslated_dir}，共 {string_count} 个字符串")
             
         except Exception as e:
-            self.update_status("创建JSON文件过程中出错")
-            self.show_error(f"创建JSON文件过程中出错: {str(e)}")
+            self.thread_update_status("创建JSON文件过程中出错")
+            self.thread_show_error(f"创建JSON文件过程中出错: {str(e)}")
             
     def load_translations(self, json_path):
         with open(json_path, 'r', encoding='utf-8') as file:
@@ -705,11 +887,15 @@ class RPGTranslationAssistant:
         if not self.check_game_path():
             return
             
+        self.run_in_thread(self._release_mtool_files)
+    
+    def _release_mtool_files(self):
+        """实际执行释放JSON文件的线程函数"""
         game_path = self.game_path.get()
         string_scripts_path = os.path.join(game_path, "StringScripts")
         
         if not os.path.exists(string_scripts_path):
-            self.show_error("未找到StringScripts文件夹，请先导出文本")
+            self.thread_show_error("未找到StringScripts文件夹，请先导出文本")
             return
             
         # 获取游戏文件夹名称
@@ -719,21 +905,21 @@ class RPGTranslationAssistant:
         translated_dir = os.path.join(self.works_dir, game_folder_name, "translated")
         
         if not os.path.exists(translated_dir):
-            self.show_error(f"未找到已翻译的文件夹: {translated_dir}")
+            self.thread_show_error(f"未找到已翻译的文件夹: {translated_dir}")
             return
             
         # 查找JSON文件
         json_files = [f for f in os.listdir(translated_dir) if f.endswith('.json')]
         
         if not json_files:
-            self.show_error(f"在 {translated_dir} 中未找到JSON文件")
+            self.thread_show_error(f"在 {translated_dir} 中未找到JSON文件")
             return
             
         # 如果只有一个JSON文件，直接使用；否则让用户选择
         json_path = None
         if len(json_files) == 1:
             json_path = os.path.join(translated_dir, json_files[0])
-            self.log(f"使用翻译文件: {json_files[0]}")
+            self.thread_log(f"使用翻译文件: {json_files[0]}")
         else:
             # 创建选择对话框
             selection = tk.StringVar()
@@ -764,17 +950,17 @@ class RPGTranslationAssistant:
             
             if selection.get():
                 json_path = os.path.join(translated_dir, selection.get())
-                self.log(f"使用翻译文件: {selection.get()}")
+                self.thread_log(f"使用翻译文件: {selection.get()}")
             else:
-                self.log("取消选择翻译文件")
+                self.thread_log("取消选择翻译文件")
                 return
         
-        self.update_status("正在释放JSON文件...")
+        self.thread_update_status("正在释放JSON文件...")
         
         try:
             # 加载翻译
             translations = self.load_translations(json_path)
-            self.log(f"已加载 {len(translations)} 个翻译条目")
+            self.thread_log(f"已加载 {len(translations)} 个翻译条目")
             
             # 应用到所有文本文件
             file_count = 0
@@ -788,20 +974,24 @@ class RPGTranslationAssistant:
                         total_translated += translated
                         file_count += 1
                         
-            self.update_status("JSON文件释放完成")
-            self.show_success(f"已将翻译应用到StringScripts文件夹，处理了 {file_count} 个文件，应用了 {total_translated} 个翻译")
+            self.thread_update_status("JSON文件释放完成")
+            self.thread_show_success(f"已将翻译应用到StringScripts文件夹，处理了 {file_count} 个文件，应用了 {total_translated} 个翻译")
             
         except Exception as e:
-            self.update_status("释放JSON文件过程中出错")
-            self.show_error(f"释放JSON文件过程中出错: {str(e)}")
+            self.thread_update_status("释放JSON文件过程中出错")
+            self.thread_show_error(f"释放JSON文件过程中出错: {str(e)}")
             
     def import_text(self):
         if not self.check_game_path():
             return
             
+        self.run_in_thread(self._import_text)
+    
+    def _import_text(self):
+        """实际执行文本导入的线程函数"""
         game_path = self.game_path.get()
         encoding = self.import_encoding.get().split(' - ')[-1]
-        self.update_status(f"正在导入文本 (编码: {encoding})...")
+        self.thread_update_status(f"正在导入文本 (编码: {encoding})...")
         
         try:
             # 设置编码
@@ -812,15 +1002,15 @@ class RPGTranslationAssistant:
                 "-import",
                 "-writecode", encoding
             ]
-            self.log(f"执行命令: {' '.join(import_cmd)}")
+            self.thread_log(f"执行命令: {' '.join(import_cmd)}")
             subprocess.run(import_cmd, check=True)
             
-            self.update_status("文本导入完成")
-            self.show_success("文本已从StringScripts文件夹导入到游戏中")
+            self.thread_update_status("文本导入完成")
+            self.thread_show_success("文本已从StringScripts文件夹导入到游戏中")
             
         except Exception as e:
-            self.update_status("文本导入过程中出错")
-            self.show_error(f"文本导入过程中出错: {str(e)}")
+            self.thread_update_status("文本导入过程中出错")
+            self.thread_show_error(f"文本导入过程中出错: {str(e)}")
             
     def show_rtp_selection(self):
         """显示RTP选择对话框"""
