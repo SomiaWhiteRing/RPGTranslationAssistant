@@ -461,19 +461,30 @@ class RPGTranslationAssistant:
             # 生成一个不需要Y/N回答的日志文件名
             log_filename = "renames_log.txt" if self.write_log_var.get() else "null"
             
-            # 重写数据文件，使用 -log 参数直接指定日志文件
+            # 重写数据文件，使用管道方式处理可能的交互式提示
             rewrite_cmd = [self.rpgrewriter_path, lmt_path, "-rewrite", "-all", "-log", log_filename]
             self.log(f"执行命令: {' '.join(rewrite_cmd)}")
             
-            rewrite_result = subprocess.run(rewrite_cmd, capture_output=True, text=True)
-            if rewrite_result.stdout:
-                self.log("命令输出: " + rewrite_result.stdout.strip())
-            if rewrite_result.stderr:
-                self.log("命令错误: " + rewrite_result.stderr.strip(), "error")
+            # 使用Popen代替run，这样可以处理交互式提示
+            process = subprocess.Popen(
+                rewrite_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
             
-            if rewrite_result.returncode != 0:
-                self.log(f"数据重写失败，返回代码: {rewrite_result.returncode}", "error")
-                raise Exception(f"数据重写失败，返回代码: {rewrite_result.returncode}")
+            # 向进程发送"Y"以应对可能的"是否保存日志"提示
+            stdout, stderr = process.communicate(input="Y\n")
+            
+            if stdout:
+                self.log("命令输出: " + stdout.strip())
+            if stderr:
+                self.log("命令错误: " + stderr.strip(), "error")
+            
+            if process.returncode != 0:
+                self.log(f"数据重写失败，返回代码: {process.returncode}", "error")
+                raise Exception(f"数据重写失败，返回代码: {process.returncode}")
             
             self.update_status("文件名重写完成")
             self.show_success("文件名重写完成")
