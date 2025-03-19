@@ -168,7 +168,7 @@ TroopNames=0
 ##
 
 
-@IgnoreLengthLimits=0
+@IgnoreLengthLimits=1
 // 2: Enforce Limits Except For $S Messages
 // 1: Don't Enforce Any Limits
 // 0: Enforce Limits [Default]
