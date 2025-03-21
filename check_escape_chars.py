@@ -39,49 +39,59 @@ def check_escape_chars(json_file_path):
         # 检查每个键值对
         for key, value in data.items():
             line_number = line_numbers.get(key, '未知')
-            # 计算反斜杠数量
+            
+            # 合并处理不同类型的不匹配
+            mismatches = []
+            mismatch_details = {}
+            
+            # 计算并检查反斜杠数量
             key_backslashes = key.count('\\')
             value_backslashes = value.count('\\')
+            if key_backslashes != value_backslashes:
+                mismatches.append("反斜杠不匹配")
+                mismatch_details["反斜杠"] = {
+                    "键中数量": key_backslashes,
+                    "值中数量": value_backslashes
+                }
             
-            # 计算感叹号数量
+            # 计算并检查感叹号数量
             key_exclamations = key.count('!')
             value_exclamations = value.count('!')
+            if key_exclamations != value_exclamations:
+                mismatches.append("感叹号不匹配")
+                mismatch_details["感叹号"] = {
+                    "键中数量": key_exclamations,
+                    "值中数量": value_exclamations
+                }
             
-            # 计算竖线数量
+            # 计算并检查竖线数量
             key_pipes = key.count('|')
             value_pipes = value.count('|')
-            
-            # 检查反斜杠数量是否匹配
-            if key_backslashes != value_backslashes:
-                warnings.append({
-                    "行号": line_number,
-                    "类型": "反斜杠不匹配",
-                    "键": repr(key)[1:-1],  # 使用repr保持转义符
-                    "键中数量": key_backslashes,
-                    "值": repr(value)[1:-1],  # 使用repr保持转义符
-                    "值中数量": value_backslashes
-                })
-            
-            # 检查感叹号数量是否匹配
-            if key_exclamations != value_exclamations:
-                warnings.append({
-                    "行号": line_number,
-                    "类型": "感叹号不匹配",
-                    "键": repr(key)[1:-1],
-                    "键中数量": key_exclamations,
-                    "值": repr(value)[1:-1],
-                    "值中数量": value_exclamations
-                })
-            
-            # 检查竖线数量是否匹配
             if key_pipes != value_pipes:
+                mismatches.append("竖线不匹配")
+                mismatch_details["竖线"] = {
+                    "键中数量": key_pipes,
+                    "值中数量": value_pipes
+                }
+            
+            # 计算并检查换行符数量
+            key_newlines = key.count('\n')
+            value_newlines = value.count('\n')
+            if key_newlines != value_newlines:
+                mismatches.append("换行符不匹配")
+                mismatch_details["换行符"] = {
+                    "键中数量": key_newlines,
+                    "值中数量": value_newlines
+                }
+            
+            # 如果存在不匹配，添加合并的警告
+            if mismatches:
                 warnings.append({
                     "行号": line_number,
-                    "类型": "竖线不匹配",
-                    "键": repr(key)[1:-1],
-                    "键中数量": key_pipes,
-                    "值": repr(value)[1:-1],
-                    "值中数量": value_pipes
+                    "类型": ", ".join(mismatches),
+                    "键": repr(key)[1:-1],  # 使用repr保持转义符
+                    "值": repr(value)[1:-1],  # 使用repr保持转义符
+                    "不匹配详情": mismatch_details
                 })
     
     except Exception as e:
@@ -107,10 +117,15 @@ def main():
         
         # 将警告以简洁格式打印到控制台
         for i, warning in enumerate(warnings, 1):
-            if "错误" in warning:
+            if isinstance(warning, str):  # 处理字符串形式的警告
+                print(f"{i}. 错误: {warning}")
+            elif isinstance(warning, dict) and "错误" in warning:  # 处理字典形式的错误警告
                 print(f"{i}. 错误: {warning['错误']}")
-            else:
-                print(f"{i}. 第{warning['行号']}行 {warning['类型']}: 键 '{warning['键']}' ({warning['键中数量']}) vs 值 '{warning['值']}' ({warning['值中数量']})")
+            else:  # 处理正常的不匹配警告
+                print(f"{i}. 第{warning['行号']}行 {warning['类型']}: 键 '{warning['键']}' vs 值 '{warning['值']}'")
+                # 打印详细的不匹配信息
+                for char_type, details in warning.get('不匹配详情', {}).items():
+                    print(f"   - {char_type}: 键中有 {details['键中数量']} 个，值中有 {details['值中数量']} 个")
         
         # 将警告写入结果文件（YAML格式）
         result_file_path = os.path.splitext(json_file_path)[0] + '_检查结果.yaml'
@@ -121,4 +136,4 @@ def main():
         print("未发现问题，所有转义字符数量匹配。")
 
 if __name__ == "__main__":
-    main() 
+    main()
