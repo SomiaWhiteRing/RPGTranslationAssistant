@@ -74,14 +74,16 @@ def check_escape_chars(json_file_path):
                     "值中数量": value_pipes
                 }
             
-            # 计算并检查换行符数量
+            # 检查换行符 - 修改逻辑
             key_newlines = key.count('\n')
             value_newlines = value.count('\n')
-            if key_newlines != value_newlines:
+            # 只在键有换行符但值完全没有换行符，或值只在开头有一个换行符时报错
+            if key_newlines > 0 and (value_newlines == 0 or (key_newlines > 1 and value_newlines == 1 and value.startswith('\n'))):
                 mismatches.append("换行符不匹配")
                 mismatch_details["换行符"] = {
                     "键中数量": key_newlines,
-                    "值中数量": value_newlines
+                    "值中数量": value_newlines,
+                    "值是否只在开头有一个换行符": value_newlines == 1 and value.startswith('\n')
                 }
             
             # 如果存在不匹配，添加合并的警告
