@@ -835,7 +835,6 @@ class RPGTranslationAssistant:
                 i += 1
                 if title == 'Message' or title == 'Choice':
                     message = ''
-                    start_i = i
                     while i < len(lines) and not lines[i].strip() == '##':
                         message += lines[i]
                         i += 1
@@ -845,7 +844,8 @@ class RPGTranslationAssistant:
                     
                     # 1. 尝试原始消息
                     if message in translations:
-                        translated_message = translations[message].replace('\\n', '\n')
+                        # 修改这里：不对已经是\n的转义序列进行替换
+                        translated_message = translations[message]
                         new_lines.append(translated_message)
                         translated_count += 1
                         found_translation = True
@@ -853,7 +853,7 @@ class RPGTranslationAssistant:
                         # 2. 尝试移除尾部换行符的消息
                         message_stripped = message.rstrip('\n')
                         if message_stripped in translations:
-                            translated_message = translations[message_stripped].replace('\\n', '\n')
+                            translated_message = translations[message_stripped]
                             # 保持与原始消息相同的格式（是否有尾部换行符）
                             if message.endswith('\n') and not translated_message.endswith('\n'):
                                 translated_message += '\n'
@@ -869,7 +869,8 @@ class RPGTranslationAssistant:
                 elif title != 'EventName':
                     content = lines[i].strip()
                     if content in translations:
-                        translated_content = translations[content].replace('\\n', '\n')
+                        # 这里也移除replace操作
+                        translated_content = translations[content]
                         new_lines.append(translated_content + '\n')
                         translated_count += 1
                     else:
@@ -1000,7 +1001,8 @@ class RPGTranslationAssistant:
                 self.rpgrewriter_path,
                 lmt_path,
                 "-import",
-                "-writecode", encoding
+                "-writecode", encoding,
+                "-nolimit", "1"
             ]
             self.thread_log(f"执行命令: {' '.join(import_cmd)}")
             subprocess.run(import_cmd, check=True)
