@@ -20,9 +20,9 @@ class RPGTranslationAssistant:
         
         # 设置程序路径
         self.program_dir = os.path.dirname(os.path.abspath(__file__))
-        self.rpgrewriter_path = os.path.join(self.program_dir, "RPGRewriter", "RPGRewriter.exe")
-        self.easyrpg_path = os.path.join(self.program_dir, "EasyRPG")
-        self.rtpcollection_path = os.path.join(self.program_dir, "RTPCollection")
+        self.rpgrewriter_path = os.path.join(self.program_dir, "modules/RPGRewriter", "RPGRewriter.exe")
+        self.easyrpg_path = os.path.join(self.program_dir, "modules/EasyRPG")
+        self.rtpcollection_path = os.path.join(self.program_dir, "modules/RTPCollection")
         self.works_dir = os.path.join(self.program_dir, "Works")
         
         # 创建Works目录（如果不存在）
