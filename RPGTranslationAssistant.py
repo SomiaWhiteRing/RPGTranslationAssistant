@@ -1,5 +1,4 @@
 import os
-import sys
 import shutil
 import subprocess
 import tkinter as tk
@@ -8,26 +7,14 @@ import json
 import re
 import csv
 import io
-from pathlib import Path
 import datetime
 import threading
 import queue
-import time
+import traceback
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
-
-# 尝试导入依赖，如果失败则提示
-try:
-    import google.generativeai as genai
-except ImportError:
-    messagebox.showerror("缺少依赖", "请先安装 google-generativeai 库 (pip install google-generativeai)")
-    sys.exit(1)
-try:
-    from openai import OpenAI
-except ImportError:
-    messagebox.showerror("缺少依赖", "请先安装 openai 库 (pip install openai)")
-    sys.exit(1)
-
+from openai import OpenAI
+from google import genai
 
 class RPGTranslationAssistant:
     def __init__(self, root):
@@ -111,8 +98,94 @@ class RPGTranslationAssistant:
         self.create_ui()
         self.log("程序已启动，请选择游戏目录")
 
+        # --- 新增：配置文件路径和加载 ---
+        self.config_file_path = os.path.join(self.program_dir, "app_config.json")
+        self.world_dict_config = {} # 先置空，由 load_config 填充
+        self.translate_config = {} # 先置空，由 load_config 填充
+        self.load_config() # 加载现有配置或设置默认值
+
         # 启动消息处理器
         self.root.after(100, self.process_messages)
+
+    def load_config(self):
+        """加载配置文件，如果不存在则使用默认值"""
+        # --- 默认配置 ---
+        default_world_dict_config = {
+            "api_key": "",
+            "model": "gemini-2.5-pro-exp-03-25", # 更新为推荐模型
+            "prompt": """请分析提供的游戏文本，提取其中反复出现的名词。提取规则如下：
+1.  类别限定为：地点、角色、生物、组织、物品。
+2.  输出格式为严格的CSV，包含四列：原文,译文,类别,描述。请确保每个字段都被双引号包围，字段内的逗号和换行符需要正确转义。
+3.  提取的名词在原文中至少出现两次。
+4.  忽略单个汉字、假名或字母。忽略常见的、过于笼统的词汇（例如：门、钥匙、药水、史莱姆、哥布林等，除非它们有特殊的前缀或后缀）。
+5.  译文请根据上下文推断一个合适的简体中文翻译。
+6.  对于“角色”类别，请在“描述”列中尽可能包含角色的【年龄/性别/性格/口吻】等信息，如果没有明确信息则留空。其他类别的“描述”列可以留空。
+7.  CSV首行不需要表头。
+
+以下是需要分析的游戏文本内容：
+{game_text}"""
+        }
+        default_translate_config = {
+            "api_url": "https://ark.cn-beijing.volces.com/api/v3", # 修正为DeepSeek官方API地址
+            "api_key": "",
+            "model": "deepseek-v3-250324", # 修正为正确的模型名称
+            "batch_size": 10,
+            "context_lines": 10,
+            "concurrency": 16,
+            "prompt_template": """你是一名专业的翻译家，你的任务是把{source_language}文本翻译成{target_language}，逐行翻译，不要合并，保留文本中序号、标记符、占位符、换行符等特殊内容，保持原来的格式。
+
+### 翻译原则
+忠实准确地进行翻译。原作是伟大艺术作品，允许使用直白或粗俗的描述，不应随意删减或篡改，不应回避或淡化，以保持作品的原貌。
+
+{glossary_section}
+
+{context_section}
+
+### 这是你接下来的翻译任务，原文文本如下
+<textarea>
+{batch_text}
+</textarea>
+
+### 请以textarea标签输出译文
+<textarea>
+1.{target_language}文本
+</textarea>"""
+        }
+
+        try:
+            if os.path.exists(self.config_file_path):
+                with open(self.config_file_path, 'r', encoding='utf-8') as f:
+                    loaded_configs = json.load(f)
+                # 使用加载的配置更新默认配置，确保新旧键都存在
+                self.world_dict_config = default_world_dict_config.copy()
+                self.world_dict_config.update(loaded_configs.get("world_dict_config", {}))
+
+                self.translate_config = default_translate_config.copy()
+                self.translate_config.update(loaded_configs.get("translate_config", {}))
+
+                self.log("已成功加载保存的配置。")
+            else:
+                self.world_dict_config = default_world_dict_config
+                self.translate_config = default_translate_config
+                self.log("未找到配置文件，使用默认配置。")
+        except (json.JSONDecodeError, IOError, Exception) as e:
+            self.log(f"加载配置失败: {e}，将使用默认配置。", "error")
+            self.world_dict_config = default_world_dict_config
+            self.translate_config = default_translate_config
+
+    def save_config(self):
+        """保存当前配置到文件"""
+        try:
+            configs_to_save = {
+                "world_dict_config": self.world_dict_config,
+                "translate_config": self.translate_config
+            }
+            with open(self.config_file_path, 'w', encoding='utf-8') as f:
+                json.dump(configs_to_save, f, indent=4, ensure_ascii=False)
+            self.log("配置已成功保存。", "success")
+        except (IOError, Exception) as e:
+            self.log(f"保存配置失败: {e}", "error")
+            messagebox.showerror("保存失败", f"无法保存配置文件到:\n{self.config_file_path}\n错误: {e}")
 
     def create_ui(self):
         # 创建主框架
@@ -707,8 +780,8 @@ class RPGTranslationAssistant:
             self.thread_log(f"临时文件已创建: {temp_text_path}")
 
             # 3. 调用Gemini API
-            api_key = self.world_dict_config.get("api_key")
-            model_name = self.world_dict_config.get("model")
+            api_key = self.world_dict_config.get("api_key").strip()
+            model_name = self.world_dict_config.get("model").strip()
             prompt_template = self.world_dict_config.get("prompt")
 
             if not api_key:
@@ -716,15 +789,8 @@ class RPGTranslationAssistant:
                 return
 
             self.thread_log(f"正在调用Gemini API (模型: {model_name})...")
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(
-                model_name,
-                # 降低安全限制，避免误拦截
-                safety_settings={
-                    f"HARM_CATEGORY_{cat}": "BLOCK_NONE"
-                    for cat in ["HARASSMENT", "HATE_SPEECH", "SEXUALLY_EXPLICIT", "DANGEROUS_CONTENT"]
-                }
-            )
+
+            client = genai.Client(api_key=api_key)
 
             # 读取临时文件内容并替换到Prompt中
             with open(temp_text_path, 'r', encoding='utf-8') as f:
@@ -737,7 +803,9 @@ class RPGTranslationAssistant:
             # 注意：Gemini API 可能对单次请求的大小有限制，即使模型支持长上下文
             # 这里为了简化，假设文本大小在API允许范围内
             try:
-                response = model.generate_content(final_prompt)
+                response = client.models.generate_content(
+                    model=model_name, contents=final_prompt
+                )
                 csv_response = response.text
             except Exception as api_err:
                  # 捕获并记录详细的API错误信息
@@ -842,8 +910,8 @@ class RPGTranslationAssistant:
 
         # 3. 获取翻译配置
         api_url = self.translate_config.get("api_url")
-        api_key = self.translate_config.get("api_key")
-        model_name = self.translate_config.get("model")
+        api_key = self.translate_config.get("api_key").strip()
+        model_name = self.translate_config.get("model").strip()
         batch_size = self.translate_config.get("batch_size", 10)
         context_lines = self.translate_config.get("context_lines", 10)
         concurrency = self.translate_config.get("concurrency", 16)
@@ -1196,20 +1264,23 @@ class RPGTranslationAssistant:
 
     # --- 新增：配置窗口打开方法 ---
     def open_world_dict_config(self):
-        WorldDictConfigWindow(self.root, self.world_dict_config)
+        WorldDictConfigWindow(self, self.world_dict_config)
 
     def open_translate_config(self):
-        TranslateConfigWindow(self.root, self.translate_config)
+        TranslateConfigWindow(self, self.translate_config)
 
 # --- 新增：世界观字典配置窗口 ---
 class WorldDictConfigWindow(tk.Toplevel):
-    def __init__(self, parent, config):
-        super().__init__(parent)
+    def __init__(self, parent_app, config): # 传入主应用实例 parent_app
+        super().__init__(parent_app.root) # 父窗口是主应用的 root
+        self.parent_app = parent_app
         self.config = config
-        self.transient(parent)
+        self.initial_config = config.copy() # 保存初始配置用于比较
+        self.connection_tested_ok = False   # 标记连接测试是否通过
+        self.transient(parent_app.root)
         self.grab_set()
-        self.title("世界观字典配置")
-        self.geometry("600x500") # 增加高度
+        self.title("世界观字典配置 (Gemini)")
+        self.geometry("600x550") # 稍微增加高度容纳测试按钮和状态
 
         frame = ttk.Frame(self, padding="10")
         frame.pack(fill=tk.BOTH, expand=True)
@@ -1219,19 +1290,24 @@ class WorldDictConfigWindow(tk.Toplevel):
         key_frame.pack(fill=tk.X, pady=5)
         ttk.Label(key_frame, text="Gemini API Key:", width=15).pack(side=tk.LEFT)
         self.api_key_var = tk.StringVar(value=config.get("api_key", ""))
-        ttk.Entry(key_frame, textvariable=self.api_key_var, width=50).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.api_key_entry = ttk.Entry(key_frame, textvariable=self.api_key_var, width=50, show="*") # 隐藏Key
+        self.api_key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        # 添加显示/隐藏按钮
+        self.show_key_var = tk.BooleanVar(value=False)
+        key_toggle_button = ttk.Checkbutton(key_frame, text="显示", variable=self.show_key_var, command=self.toggle_key_visibility)
+        key_toggle_button.pack(side=tk.LEFT)
+
 
         # Model Name
         model_frame = ttk.Frame(frame)
         model_frame.pack(fill=tk.X, pady=5)
         ttk.Label(model_frame, text="模型名称:", width=15).pack(side=tk.LEFT)
-        self.model_var = tk.StringVar(value=config.get("model", "gemini-2.5-pro-latest"))
+        self.model_var = tk.StringVar(value=config.get("model", "gemini-2.5-pro-exp-03-25"))
         # 提供一些常用的Gemini模型选项
         model_combobox = ttk.Combobox(model_frame, textvariable=self.model_var, values=[
-            "gemini-2.5-pro-latest",
-            "gemini-2.5-flash-latest",
-            "gemini-pro", # 旧版Pro，可能不再推荐
-            # 添加你可能需要的其他模型
+            "gemini-1.5-pro-latest",
+            "gemini-2.5-pro-exp-03-25",
+            "gemini-pro", # 旧版Pro
         ], width=48)
         model_combobox.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
@@ -1239,35 +1315,155 @@ class WorldDictConfigWindow(tk.Toplevel):
         # Prompt
         prompt_frame = ttk.LabelFrame(frame, text="Prompt", padding="5")
         prompt_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.prompt_text = tk.Text(prompt_frame, wrap=tk.WORD, height=15) # 增加高度
+        self.prompt_text = tk.Text(prompt_frame, wrap=tk.WORD, height=15)
         self.prompt_text.insert(tk.END, config.get("prompt", ""))
         prompt_scroll = ttk.Scrollbar(prompt_frame, command=self.prompt_text.yview)
         self.prompt_text.configure(yscrollcommand=prompt_scroll.set)
         prompt_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.prompt_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        # 状态标签
+        self.status_var = tk.StringVar(value="请先测试连接")
+        status_label = ttk.Label(frame, textvariable=self.status_var, foreground="orange")
+        status_label.pack(fill=tk.X, pady=(5, 0))
+
         # Buttons
         button_frame = ttk.Frame(frame)
         button_frame.pack(fill=tk.X, pady=10)
-        ttk.Button(button_frame, text="保存", command=self.save_config).pack(side=tk.RIGHT, padx=5)
+        self.save_button = ttk.Button(button_frame, text="保存", command=self.save_config, state=tk.DISABLED)
+        self.save_button.pack(side=tk.RIGHT, padx=5)
+        self.test_button = ttk.Button(button_frame, text="测试连接", command=self.test_connection)
+        self.test_button.pack(side=tk.RIGHT, padx=5)
         ttk.Button(button_frame, text="取消", command=self.destroy).pack(side=tk.RIGHT)
 
+        # 绑定修改事件，以便在更改后需要重新测试
+        self.api_key_var.trace_add("write", self.on_config_change)
+        self.model_var.trace_add("write", self.on_config_change)
+        self.prompt_text.bind("<<Modified>>", self.on_prompt_change)
+
+        # 检查初始状态，如果key存在，提示测试
+        if self.api_key_var.get():
+             self.set_status("配置已加载，请测试连接", "orange")
+        else:
+            self.set_status("请输入 API Key 并测试连接", "red")
+
+    def toggle_key_visibility(self):
+        """切换API Key的显示状态"""
+        if self.show_key_var.get():
+            self.api_key_entry.config(show="")
+        else:
+            self.api_key_entry.config(show="*")
+
+    def on_prompt_change(self, event=None):
+        """处理Prompt文本框的修改事件"""
+        # Text控件的Modified事件比较特殊，需要重置标志位
+        self.prompt_text.edit_modified(False)
+        self.on_config_change()
+
+    def on_config_change(self, *args):
+        """配置发生变化时的处理"""
+        self.connection_tested_ok = False
+        self.save_button.config(state=tk.DISABLED)
+        self.set_status("配置已更改，请重新测试连接", "orange")
+
+    def set_status(self, message, color):
+        """更新状态标签的文本和颜色"""
+        self.status_var.set(message)
+        self.children['!frame'].children['!label'].config(foreground=color) # 更新状态标签颜色
+
+    def test_connection(self):
+        """启动连接测试线程"""
+        api_key = self.api_key_var.get().strip()
+        model = self.model_var.get().strip()
+        if not api_key:
+            messagebox.showerror("错误", "请输入 Gemini API Key")
+            return
+        if not model:
+            messagebox.showerror("错误", "请输入模型名称")
+            return
+
+        self.set_status("正在测试连接...", "blue")
+        self.test_button.config(state=tk.DISABLED)
+        self.save_button.config(state=tk.DISABLED)
+
+        # 使用线程执行测试，避免阻塞UI
+        thread = threading.Thread(target=self._test_connection_thread, args=(api_key, model), daemon=True)
+        thread.start()
+
+    def _test_connection_thread(self, api_key, model):
+        """在线程中执行实际的API连接测试"""
+        try:
+            client = genai.Client(api_key=api_key)
+            response = client.models.generate_content(
+                model=model, contents="你好吗？"
+            )
+            if response and response.text:
+                self.after(0, self.test_success) # 使用after在主线程更新UI
+            else:
+                self.after(0, lambda: self.test_failure("连接成功，但未收到有效响应。"))
+
+        except Exception as e:
+            # 捕获更具体的错误类型可以提供更好的反馈
+            error_message = f"连接失败: {type(e).__name__} - {e}"
+            # 尝试从异常中获取更详细的信息
+            if hasattr(e, 'message'):
+                 error_message = f"连接失败: {e.message}"
+            elif hasattr(e, 'reason'):
+                 error_message = f"连接失败: {e.reason}"
+
+            self.after(0, lambda: self.test_failure(error_message)) # 使用after在主线程更新UI
+
+    def test_success(self):
+        """连接测试成功后的UI更新"""
+        self.connection_tested_ok = True
+        self.set_status("连接成功!", "green")
+        self.test_button.config(state=tk.NORMAL)
+        # 只有测试成功才允许保存
+        self.save_button.config(state=tk.NORMAL)
+        messagebox.showinfo("成功", "Gemini API 连接测试成功！")
+
+    def test_failure(self, error_message):
+        """连接测试失败后的UI更新"""
+        self.connection_tested_ok = False
+        self.set_status(f"连接失败", "red") # 简短状态
+        self.test_button.config(state=tk.NORMAL)
+        self.save_button.config(state=tk.DISABLED)
+        messagebox.showerror("连接失败", error_message) # 详细错误弹窗
+
     def save_config(self):
+        """保存配置"""
+        if not self.connection_tested_ok:
+            messagebox.showwarning("无法保存", "请先成功测试连接后再保存。")
+            return
+
+        # 更新内存中的配置字典
         self.config["api_key"] = self.api_key_var.get()
         self.config["model"] = self.model_var.get()
         self.config["prompt"] = self.prompt_text.get("1.0", tk.END).strip()
-        messagebox.showinfo("保存成功", "世界观字典配置已更新。")
-        self.destroy()
+
+        # 调用主应用的保存方法来写入文件
+        self.parent_app.save_config()
+
+        # 更新初始配置状态，以便下次比较
+        self.initial_config = self.config.copy()
+        self.set_status("配置已保存", "green")
+        # 保存后禁用保存按钮，直到再次修改
+        self.save_button.config(state=tk.DISABLED)
+        # messagebox.showinfo("保存成功", "世界观字典配置已更新并保存。") # save_config已有日志
+        self.destroy() # 关闭窗口
 
 # --- 新增：翻译JSON配置窗口 ---
 class TranslateConfigWindow(tk.Toplevel):
-    def __init__(self, parent, config):
-        super().__init__(parent)
+    def __init__(self, parent_app, config): # 传入主应用实例 parent_app
+        super().__init__(parent_app.root) # 父窗口是主应用的 root
+        self.parent_app = parent_app
         self.config = config
-        self.transient(parent)
+        self.initial_config = config.copy() # 保存初始配置用于比较
+        self.connection_tested_ok = False   # 标记连接测试是否通过
+        self.transient(parent_app.root)
         self.grab_set()
-        self.title("翻译JSON文件配置")
-        self.geometry("600x400") # 调整大小
+        self.title("翻译JSON文件配置 (OpenAI兼容)")
+        self.geometry("600x450") # 稍微增加高度
 
         frame = ttk.Frame(self, padding="10")
         frame.pack(fill=tk.BOTH, expand=True)
@@ -1276,73 +1472,200 @@ class TranslateConfigWindow(tk.Toplevel):
         url_frame = ttk.Frame(frame)
         url_frame.pack(fill=tk.X, pady=5)
         ttk.Label(url_frame, text="API URL:", width=15).pack(side=tk.LEFT)
-        self.api_url_var = tk.StringVar(value=config.get("api_url", "https://api.deepseek.com/v1"))
-        ttk.Entry(url_frame, textvariable=self.api_url_var, width=50).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.api_url_var = tk.StringVar(value=config.get("api_url", "https://ark.cn-beijing.volces.com/api/v3"))
+        self.api_url_entry = ttk.Entry(url_frame, textvariable=self.api_url_var, width=50)
+        self.api_url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
         # API Key
         key_frame = ttk.Frame(frame)
         key_frame.pack(fill=tk.X, pady=5)
         ttk.Label(key_frame, text="API Key:", width=15).pack(side=tk.LEFT)
         self.api_key_var = tk.StringVar(value=config.get("api_key", ""))
-        ttk.Entry(key_frame, textvariable=self.api_key_var, width=50).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.api_key_entry = ttk.Entry(key_frame, textvariable=self.api_key_var, width=50, show="*")
+        self.api_key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        # 添加显示/隐藏按钮
+        self.show_key_var = tk.BooleanVar(value=False)
+        key_toggle_button = ttk.Checkbutton(key_frame, text="显示", variable=self.show_key_var, command=self.toggle_key_visibility)
+        key_toggle_button.pack(side=tk.LEFT)
 
         # Model Name
         model_frame = ttk.Frame(frame)
         model_frame.pack(fill=tk.X, pady=5)
         ttk.Label(model_frame, text="模型名称:", width=15).pack(side=tk.LEFT)
-        self.model_var = tk.StringVar(value=config.get("model", "deepseek-chat"))
+        self.model_var = tk.StringVar(value=config.get("model", "deepseek-v3-250324"))
         # 提供一些常用OpenAI兼容模型选项
         model_combobox = ttk.Combobox(model_frame, textvariable=self.model_var, values=[
-            "deepseek-chat", "deepseek-coder", # DeepSeek
-            "gpt-3.5-turbo", "gpt-4o", "gpt-4o-mini", # OpenAI
+            "deepseek-v3-250324", "deepseek-r1-250120", # 火山引擎
+            "deepseek-chat", "deepseek-reasoner" # Deepseek官方
             # 添加其他你可能使用的模型
         ], width=48)
         model_combobox.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
+        # Spinboxes in a subframe for better layout
+        spinbox_frame = ttk.Frame(frame)
+        spinbox_frame.pack(fill=tk.X, pady=5)
+
         # Batch Size
-        batch_frame = ttk.Frame(frame)
-        batch_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(batch_frame, text="批次大小:", width=15).pack(side=tk.LEFT)
+        batch_frame = ttk.Frame(spinbox_frame)
+        batch_frame.pack(side=tk.LEFT, padx=5)
+        ttk.Label(batch_frame, text="批次大小:", width=8).pack(side=tk.LEFT)
         self.batch_var = tk.IntVar(value=config.get("batch_size", 10))
-        ttk.Spinbox(batch_frame, from_=1, to=100, textvariable=self.batch_var, width=10).pack(side=tk.LEFT, padx=5)
+        self.batch_spinbox = ttk.Spinbox(batch_frame, from_=1, to=100, textvariable=self.batch_var, width=5)
+        self.batch_spinbox.pack(side=tk.LEFT)
 
         # Context Lines
-        context_frame = ttk.Frame(frame)
-        context_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(context_frame, text="上文行数:", width=15).pack(side=tk.LEFT)
+        context_frame = ttk.Frame(spinbox_frame)
+        context_frame.pack(side=tk.LEFT, padx=5)
+        ttk.Label(context_frame, text="上文行数:", width=8).pack(side=tk.LEFT)
         self.context_var = tk.IntVar(value=config.get("context_lines", 10))
-        ttk.Spinbox(context_frame, from_=0, to=50, textvariable=self.context_var, width=10).pack(side=tk.LEFT, padx=5)
+        self.context_spinbox = ttk.Spinbox(context_frame, from_=0, to=50, textvariable=self.context_var, width=5)
+        self.context_spinbox.pack(side=tk.LEFT)
 
         # Concurrency
-        concur_frame = ttk.Frame(frame)
-        concur_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(concur_frame, text="并发数:", width=15).pack(side=tk.LEFT)
+        concur_frame = ttk.Frame(spinbox_frame)
+        concur_frame.pack(side=tk.LEFT, padx=5)
+        ttk.Label(concur_frame, text="并发数:", width=6).pack(side=tk.LEFT)
         self.concur_var = tk.IntVar(value=config.get("concurrency", 16))
-        ttk.Spinbox(concur_frame, from_=1, to=64, textvariable=self.concur_var, width=10).pack(side=tk.LEFT, padx=5)
+        self.concur_spinbox = ttk.Spinbox(concur_frame, from_=1, to=64, textvariable=self.concur_var, width=5)
+        self.concur_spinbox.pack(side=tk.LEFT)
 
-        # Prompt Template (显示部分，允许滚动)
+        # Prompt Template (只读显示)
         prompt_frame = ttk.LabelFrame(frame, text="Prompt 模板 (只读)", padding="5")
         prompt_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         prompt_display = scrolledtext.ScrolledText(prompt_frame, wrap=tk.WORD, height=5)
         prompt_display.insert(tk.END, config.get("prompt_template", ""))
-        prompt_display.config(state=tk.DISABLED) # 设置为只读
+        prompt_display.config(state=tk.DISABLED)
         prompt_display.pack(fill=tk.BOTH, expand=True)
+
+        # 状态标签
+        self.status_var = tk.StringVar(value="请先测试连接")
+        status_label = ttk.Label(frame, textvariable=self.status_var, foreground="orange")
+        status_label.pack(fill=tk.X, pady=(5, 0))
 
         # Buttons
         button_frame = ttk.Frame(frame)
         button_frame.pack(fill=tk.X, pady=10)
-        ttk.Button(button_frame, text="保存", command=self.save_config).pack(side=tk.RIGHT, padx=5)
+        self.save_button = ttk.Button(button_frame, text="保存", command=self.save_config, state=tk.DISABLED)
+        self.save_button.pack(side=tk.RIGHT, padx=5)
+        self.test_button = ttk.Button(button_frame, text="测试连接", command=self.test_connection)
+        self.test_button.pack(side=tk.RIGHT, padx=5)
         ttk.Button(button_frame, text="取消", command=self.destroy).pack(side=tk.RIGHT)
 
+        # 绑定修改事件
+        self.api_url_var.trace_add("write", self.on_config_change)
+        self.api_key_var.trace_add("write", self.on_config_change)
+        self.model_var.trace_add("write", self.on_config_change)
+        self.batch_var.trace_add("write", self.on_config_change)
+        self.context_var.trace_add("write", self.on_config_change)
+        self.concur_var.trace_add("write", self.on_config_change)
+
+        # 检查初始状态
+        if self.api_key_var.get() and self.api_url_var.get():
+            self.set_status("配置已加载，请测试连接", "orange")
+        else:
+            self.set_status("请输入 API URL 和 Key 并测试连接", "red")
+
+    def toggle_key_visibility(self):
+        """切换API Key的显示状态"""
+        if self.show_key_var.get():
+            self.api_key_entry.config(show="")
+        else:
+            self.api_key_entry.config(show="*")
+
+    def on_config_change(self, *args):
+        """配置发生变化时的处理"""
+        # Spinbox 的 trace 可能触发多次，简单处理
+        if not hasattr(self, 'save_button') or not self.save_button.winfo_exists():
+             return # 防止窗口销毁后还触发trace
+        self.connection_tested_ok = False
+        self.save_button.config(state=tk.DISABLED)
+        self.set_status("配置已更改，请重新测试连接", "orange")
+
+    def set_status(self, message, color):
+        """更新状态标签的文本和颜色"""
+        self.status_var.set(message)
+        # 定位状态标签并更新颜色
+        status_widget = None
+        for widget in self.children['!frame'].winfo_children():
+            if isinstance(widget, ttk.Label) and hasattr(widget, 'cget') and 'textvariable' in widget.keys() and str(widget.cget('textvariable')) == str(self.status_var):
+                 status_widget = widget
+                 break
+        if status_widget:
+            status_widget.config(foreground=color)
+
+
+    def test_connection(self):
+        """启动连接测试线程"""
+        api_key = self.api_key_var.get().strip()
+        api_url = self.api_url_var.get().strip()
+        if not api_key or not api_url:
+            messagebox.showerror("错误", "请输入 API URL 和 API Key")
+            return
+
+        self.set_status("正在测试连接...", "blue")
+        self.test_button.config(state=tk.DISABLED)
+        self.save_button.config(state=tk.DISABLED)
+
+        # 使用线程执行测试
+        thread = threading.Thread(target=self._test_connection_thread, args=(api_url, api_key), daemon=True)
+        thread.start()
+
+    def _test_connection_thread(self, api_url, api_key):
+        """在线程中执行实际的API连接测试"""
+        try:
+            client = OpenAI(base_url=api_url, api_key=api_key)
+            response = client.chat.completions.create(
+                model=self.model_var.get().strip(),
+                messages=[{"role": "user", "content": "你好吗？"}]
+            )
+            if response and response.choices[0].message.content:
+                self.after(0, self.test_success)
+            else:
+                self.after(0, lambda: self.test_failure("连接成功，但未收到有效响应。"))
+
+        except Exception as e:
+            error_message = f"连接失败: {type(e).__name__} - {e}"
+            self.after(0, lambda: self.test_failure(error_message))
+
+    def test_success(self):
+        """连接测试成功后的UI更新"""
+        self.connection_tested_ok = True
+        self.set_status("连接成功!", "green")
+        self.test_button.config(state=tk.NORMAL)
+        self.save_button.config(state=tk.NORMAL) # 测试成功即可保存
+        messagebox.showinfo("成功", "API 连接测试成功！")
+
+    def test_failure(self, error_message):
+        """连接测试失败后的UI更新"""
+        self.connection_tested_ok = False
+        self.set_status(f"连接失败", "red")
+        self.test_button.config(state=tk.NORMAL)
+        self.save_button.config(state=tk.DISABLED)
+        messagebox.showerror("连接失败", error_message)
+
     def save_config(self):
+        """保存配置"""
+        if not self.connection_tested_ok:
+            messagebox.showwarning("无法保存", "请先成功测试连接后再保存。")
+            return
+
+        # 更新内存中的配置字典
         self.config["api_url"] = self.api_url_var.get()
         self.config["api_key"] = self.api_key_var.get()
         self.config["model"] = self.model_var.get()
         self.config["batch_size"] = self.batch_var.get()
         self.config["context_lines"] = self.context_var.get()
         self.config["concurrency"] = self.concur_var.get()
-        # Prompt 模板通常不在此处修改，但如果需要也可以添加
-        messagebox.showinfo("保存成功", "翻译JSON文件配置已更新。")
+        # Prompt 模板通常不在此处修改
+
+        # 调用主应用的保存方法
+        self.parent_app.save_config()
+
+        # 更新初始配置状态
+        self.initial_config = self.config.copy()
+        self.set_status("配置已保存", "green")
+        self.save_button.config(state=tk.DISABLED) # 保存后禁用，直到修改
+        # messagebox.showinfo("保存成功", "翻译JSON文件配置已更新并保存。")
         self.destroy()
 
 if __name__ == "__main__":
@@ -1350,10 +1673,8 @@ if __name__ == "__main__":
     # 添加样式，可选
     style = ttk.Style(root)
     try:
-        # 尝试使用 'clam' 主题，如果可用的话
-        style.theme_use('clam')
+        style.theme_use('Breeze')
     except tk.TclError:
-        # 如果 'clam' 不可用，则使用默认主题
         pass
     app = RPGTranslationAssistant(root)
     root.mainloop()
