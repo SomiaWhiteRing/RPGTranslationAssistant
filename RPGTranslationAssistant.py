@@ -51,57 +51,11 @@ class RPGTranslationAssistant:
         self.message_queue = queue.Queue()
         self.is_processing = False
 
-        # 新增功能的配置 (默认值)
-        self.world_dict_config = {
-            "api_key": "",
-            "model": "gemini-2.5-pro-exp-03-25", # 修正：使用最新的模型标识符
-            "prompt": """请分析提供的游戏文本，提取其中反复出现的名词。提取规则如下：
-1.  类别限定为：地点、角色、生物、组织、物品。
-2.  输出格式为严格的CSV，包含四列：原文,译文,类别,描述。请确保每个字段都被双引号包围，字段内的逗号和换行符需要正确转义。
-3.  提取的名词在原文中至少出现两次。
-4.  忽略单个汉字、假名或字母。忽略常见的、过于笼统的词汇（例如：门、钥匙、药水、史莱姆、哥布林等，除非它们有特殊的前缀或后缀）。
-5.  译文请根据上下文推断一个合适的简体中文翻译。
-6.  对于"角色"类别，请在"描述"列中尽可能包含角色的【年龄/性别/性格/口吻】等信息，如果没有明确信息则留空。其他类别的"描述"列可以留空。
-7.  CSV首行不需要表头。
-
-以下是需要分析的游戏文本内容：
-{game_text}"""
-        }
-
-        self.translate_config = {
-            "api_url": "https://ark.cn-beijing.volces.com/api/v3",
-            "api_key": "",
-            "model": "deepseek-v3-250324",
-            "batch_size": 10,
-            "context_lines": 10,
-            "concurrency": 16,
-            "prompt_template": """你是一名专业的翻译家，你的任务是把{source_language}文本翻译成{target_language}，逐行翻译，不要合并，保留文本中序号、标记符、占位符、换行符等特殊内容，保持原来的格式。
-
-### 翻译原则
-忠实准确地进行翻译。原作是伟大艺术作品，允许使用直白或粗俗的描述，不应随意删减或篡改，不应回避或淡化，以保持作品的原貌。
-
-{glossary_section}
-
-{context_section}
-
-### 这是你接下来的翻译任务，原文文本如下
-<textarea>
-{batch_text}
-</textarea>
-
-### 请以textarea标签输出译文
-<textarea>
-1.{target_language}文本
-</textarea>"""
-        }
-
         self.create_ui()
         self.log("程序已启动，请选择游戏目录")
 
         # --- 新增：配置文件路径和加载 ---
         self.config_file_path = os.path.join(self.program_dir, "app_config.json")
-        self.world_dict_config = {} # 先置空，由 load_config 填充
-        self.translate_config = {} # 先置空，由 load_config 填充
         self.load_config() # 加载现有配置或设置默认值
 
         # 启动消息处理器
@@ -239,11 +193,11 @@ class RPGTranslationAssistant:
         ttk.Label(export_frame, text="编码:").pack(side=tk.RIGHT, padx=5)
 
         # --- 3. 制作JSON文件 ---
-        mtool_create_frame = ttk.Frame(functions_frame)
-        mtool_create_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(mtool_create_frame, text="3. 制作JSON文件", width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Label(mtool_create_frame, text="将StringScripts文本压缩为JSON").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(mtool_create_frame, text="执行", command=self.create_mtool_files).pack(side=tk.RIGHT, padx=5)
+        transjson_create_frame = ttk.Frame(functions_frame)
+        transjson_create_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(transjson_create_frame, text="3. 制作JSON文件", width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Label(transjson_create_frame, text="将StringScripts文本压缩为JSON").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(transjson_create_frame, text="执行", command=self.create_transjson_files).pack(side=tk.RIGHT, padx=5)
 
         # --- 4. 生成世界观字典 (新增) ---
         gen_dict_frame = ttk.Frame(functions_frame)
@@ -262,11 +216,11 @@ class RPGTranslationAssistant:
         ttk.Button(trans_json_frame, text="配置", command=self.open_translate_config).pack(side=tk.RIGHT, padx=5)
 
         # --- 6. 释放JSON文件 ---
-        mtool_release_frame = ttk.Frame(functions_frame)
-        mtool_release_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(mtool_release_frame, text="6. 释放JSON文件", width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Label(mtool_release_frame, text="将已翻译JSON释放到StringScripts").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(mtool_release_frame, text="执行", command=self.release_mtool_files).pack(side=tk.RIGHT, padx=5)
+        transjson_release_frame = ttk.Frame(functions_frame)
+        transjson_release_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(transjson_release_frame, text="6. 释放JSON文件", width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Label(transjson_release_frame, text="将已翻译JSON释放到StringScripts").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(transjson_release_frame, text="执行", command=self.release_transjson_files).pack(side=tk.RIGHT, padx=5)
 
         # --- 7. 导入文本 ---
         import_frame = ttk.Frame(functions_frame)
@@ -300,7 +254,7 @@ class RPGTranslationAssistant:
         status_label = ttk.Label(status_frame, textvariable=self.status_var, anchor=tk.W)
         status_label.pack(fill=tk.X)
 
-    # --- 日志和状态更新方法 (保持不变) ---
+    # --- 日志和状态更新方法 ---
     def log(self, message, level="normal"):
         self.log_text.config(state=tk.NORMAL)
         timestamp = datetime.datetime.now().strftime("[%H:%M:%S] ")
@@ -337,7 +291,7 @@ class RPGTranslationAssistant:
             return False
         return True
 
-    # --- 线程通信方法 (保持不变) ---
+    # --- 线程通信方法 ---
     def process_messages(self):
         try:
             while True:
@@ -387,7 +341,7 @@ class RPGTranslationAssistant:
         thread.daemon = True
         thread.start()
 
-    # --- 原始功能方法 (保持不变, 仅调整内部调用线程日志方法) ---
+    # --- 原始功能方法 ---
     def initialize_game(self):
         if not self.check_game_path():
             return
@@ -702,11 +656,11 @@ class RPGTranslationAssistant:
             self.thread_log(f"处理文件 {os.path.basename(file_path)} 时出错: {str(e)}", "error")
         return result
 
-    def create_mtool_files(self):
+    def create_transjson_files(self):
         if not self.check_game_path(): return
-        self.run_in_thread(self._create_mtool_files)
+        self.run_in_thread(self._create_transjson_files)
 
-    def _create_mtool_files(self):
+    def _create_transjson_files(self):
         game_path = self.game_path.get()
         string_scripts_path = os.path.join(game_path, "StringScripts")
         if not os.path.exists(string_scripts_path):
@@ -746,7 +700,7 @@ class RPGTranslationAssistant:
             self.thread_update_status("创建JSON文件过程中出错")
             self.thread_show_error(f"创建JSON文件过程中出错: {str(e)}")
 
-    # --- 新增：生成世界观字典 ---
+    # --- 生成世界观字典 ---
     def generate_world_dict(self):
         if not self.check_game_path(): return
         self.run_in_thread(self._generate_world_dict)
@@ -868,7 +822,7 @@ class RPGTranslationAssistant:
                 except Exception as del_err:
                     self.thread_log(f"删除临时文件失败: {str(del_err)}", "error")
 
-    # --- 新增：翻译JSON文件 ---
+    # --- 翻译JSON文件 ---
     def translate_json_file(self):
         if not self.check_game_path(): return
         self.run_in_thread(self._translate_json)
@@ -1164,7 +1118,7 @@ class RPGTranslationAssistant:
         except Exception as save_err:
             self.thread_show_error(f"保存翻译后的JSON文件失败: {str(save_err)}")
 
-    # --- 释放和导入功能 (保持不变, 仅调整内部调用线程日志方法) ---
+    # --- 释放和导入功能 ---
     def load_translations(self, json_path):
         with open(json_path, 'r', encoding='utf-8') as file:
             return json.load(file)
@@ -1232,11 +1186,11 @@ class RPGTranslationAssistant:
 
         return translated_count
 
-    def release_mtool_files(self):
+    def release_transjson_files(self):
         if not self.check_game_path(): return
-        self.run_in_thread(self._release_mtool_files)
+        self.run_in_thread(self._release_transjson_files)
 
-    def _release_mtool_files(self):
+    def _release_transjson_files(self):
         game_path = self.game_path.get()
         string_scripts_path = os.path.join(game_path, "StringScripts")
         if not os.path.exists(string_scripts_path):
@@ -1339,7 +1293,7 @@ class RPGTranslationAssistant:
             self.thread_update_status("文本导入过程中出错")
             self.thread_show_error(f"文本导入过程中出错: {str(e)}")
 
-    # --- RTP选择方法 (保持不变) ---
+    # --- RTP选择方法---
     def show_rtp_selection(self):
         rtp_window = tk.Toplevel(self.root)
         rtp_window.title("选择RTP")
@@ -1369,7 +1323,7 @@ class RPGTranslationAssistant:
             rtp_window.destroy()
         ttk.Button(frame, text="确定", command=on_confirm).pack(anchor=tk.CENTER, pady=(10, 0))
 
-    # --- 新增：配置窗口打开方法 ---
+    # --- 配置窗口打开方法 ---
     def open_world_dict_config(self):
         WorldDictConfigWindow(self, self.world_dict_config)
 
