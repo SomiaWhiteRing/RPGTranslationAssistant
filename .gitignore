@@ -70,3 +70,6 @@ Desktop.ini
 
 # Compiled binaries
 release.zip 
+
+# 配置文件
+app_config.json
