@@ -20,7 +20,7 @@ class RPGTranslationAssistant:
     def __init__(self, root):
         self.root = root
         self.root.title("RPG Maker 翻译助手")
-        self.root.geometry("800x750")  # 增加高度以容纳更多按钮和日志
+        # self.root.geometry("800x750") # 初始大小由模式决定
         self.root.resizable(True, True)
 
         # 设置程序路径
@@ -37,12 +37,12 @@ class RPGTranslationAssistant:
         # 游戏路径
         self.game_path = tk.StringVar()
 
-        # 编码选项
-        self.export_encoding = tk.StringVar(value="932")  # 默认日语
-        self.import_encoding = tk.StringVar(value="936")  # 默认中文
+        # 编码选项 (专业模式)
+        self.export_encoding = tk.StringVar(value="932")
+        self.import_encoding = tk.StringVar(value="936")
 
-        # RTP选项
-        self.rtp_2000 = tk.BooleanVar(value=True)   # 默认只选择2000
+        # RTP选项 (专业模式)
+        self.rtp_2000 = tk.BooleanVar(value=True)
         self.rtp_2000en = tk.BooleanVar(value=False)
         self.rtp_2003 = tk.BooleanVar(value=False)
         self.rtp_2003steam = tk.BooleanVar(value=False)
@@ -51,12 +51,24 @@ class RPGTranslationAssistant:
         self.message_queue = queue.Queue()
         self.is_processing = False
 
+        # --- 新增：模式选择 ---
+        self.selected_mode = tk.StringVar(value="easy") # 默认轻松模式
+
+        # --- 新增：轻松模式相关变量 ---
+        self.easy_mode_steps = 8 # 初始化, 重命名, 导出, 创建JSON, 生成字典, 翻译, 释放JSON, 导入
+        self.easy_mode_progress_var = tk.DoubleVar(value=0.0)
+        self.easy_mode_status_var = tk.StringVar(value="选择游戏目录后点击“开始翻译”")
+
+        # 创建UI
         self.create_ui()
         self.log("程序已启动，请选择游戏目录")
 
-        # --- 新增：配置文件路径和加载 ---
+        # --- 配置文件路径和加载 ---
         self.config_file_path = os.path.join(self.program_dir, "app_config.json")
         self.load_config() # 加载现有配置或设置默认值
+
+        # 根据加载的模式设置初始窗口大小
+        self._update_window_size(self.selected_mode.get())
 
         # 启动消息处理器
         self.root.after(100, self.process_messages)
@@ -107,6 +119,7 @@ class RPGTranslationAssistant:
 1.{target_language}文本
 </textarea>"""
         }
+        default_selected_mode = "easy" # 默认模式
 
         try:
             if os.path.exists(self.config_file_path):
@@ -119,22 +132,29 @@ class RPGTranslationAssistant:
                 self.translate_config = default_translate_config.copy()
                 self.translate_config.update(loaded_configs.get("translate_config", {}))
 
+                # 加载模式选择
+                self.selected_mode.set(loaded_configs.get("selected_mode", default_selected_mode))
+
                 self.log("已成功加载保存的配置。")
             else:
                 self.world_dict_config = default_world_dict_config
                 self.translate_config = default_translate_config
+                self.selected_mode.set(default_selected_mode)
                 self.log("未找到配置文件，使用默认配置。")
+
         except (json.JSONDecodeError, IOError, Exception) as e:
             self.log(f"加载配置失败: {e}，将使用默认配置。", "error")
             self.world_dict_config = default_world_dict_config
             self.translate_config = default_translate_config
+            self.selected_mode.set(default_selected_mode)
 
     def save_config(self):
         """保存当前配置到文件"""
         try:
             configs_to_save = {
                 "world_dict_config": self.world_dict_config,
-                "translate_config": self.translate_config
+                "translate_config": self.translate_config,
+                "selected_mode": self.selected_mode.get() # 保存当前选择的模式
             }
             with open(self.config_file_path, 'w', encoding='utf-8') as f:
                 json.dump(configs_to_save, f, indent=4, ensure_ascii=False)
@@ -148,99 +168,23 @@ class RPGTranslationAssistant:
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 游戏路径选择
+        # 游戏路径选择 (保持不变)
         path_frame = ttk.LabelFrame(main_frame, text="游戏路径", padding="5")
-        path_frame.pack(fill=tk.X, pady=5)
-
+        path_frame.pack(fill=tk.X, pady=5, side=tk.TOP) # 明确放到顶部
         ttk.Entry(path_frame, textvariable=self.game_path, width=70).pack(side=tk.LEFT, padx=5, pady=5, fill=tk.X, expand=True)
         ttk.Button(path_frame, text="浏览...", command=self.browse_game_path).pack(side=tk.LEFT, padx=5, pady=5)
 
-        # 功能区
-        functions_frame = ttk.LabelFrame(main_frame, text="功能", padding="5")
-        functions_frame.pack(fill=tk.X, pady=5)
+        # 状态栏 (先定义，放到最下面)
+        status_frame = ttk.Frame(main_frame)
+        status_frame.pack(fill=tk.X, pady=5, side=tk.BOTTOM)
+        self.status_var = tk.StringVar(value="就绪")
+        status_label = ttk.Label(status_frame, textvariable=self.status_var, anchor=tk.W)
+        status_label.pack(fill=tk.X)
 
-        # --- 0. 初始化 ---
-        init_frame = ttk.Frame(functions_frame)
-        init_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(init_frame, text="0. 初始化", width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Label(init_frame, text="复制EasyRPG和RTP文件到游戏目录，并转换文本编码").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(init_frame, text="执行", command=self.initialize_game).pack(side=tk.RIGHT, padx=5)
-        self.rtp_button_text = tk.StringVar(value="RTP选择: 2000")
-        ttk.Button(init_frame, textvariable=self.rtp_button_text, command=self.show_rtp_selection).pack(side=tk.RIGHT, padx=5)
-
-        # --- 1. 重写文件名 ---
-        rename_frame = ttk.Frame(functions_frame)
-        rename_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(rename_frame, text="1. 重写文件名", width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Label(rename_frame, text="将非ASCII文件名转换为Unicode编码格式").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(rename_frame, text="执行", command=self.rename_files).pack(side=tk.RIGHT, padx=5)
-        self.write_log_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(rename_frame, text="输出日志", variable=self.write_log_var).pack(side=tk.RIGHT, padx=5)
-
-        # --- 2. 导出文本 ---
-        export_frame = ttk.Frame(functions_frame)
-        export_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(export_frame, text="2. 导出文本", width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Label(export_frame, text="将游戏文本导出到StringScripts文件夹").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(export_frame, text="执行", command=self.export_text).pack(side=tk.RIGHT, padx=5)
-        encoding_options = [
-            ("日语 (Shift-JIS)", "932"), ("中文简体 (GBK)", "936"), ("中文繁体 (Big5)", "950"),
-            ("韩语 (EUC-KR)", "949"), ("泰语", "874"), ("拉丁语系 (西欧)", "1252"),
-            ("东欧", "1250"), ("西里尔字母", "1251")
-        ]
-        export_encoding_combobox = ttk.Combobox(export_frame, textvariable=self.export_encoding, state="readonly", width=20)
-        export_encoding_combobox['values'] = [f"{name} - {code}" for name, code in encoding_options]
-        export_encoding_combobox.current(0)
-        export_encoding_combobox.pack(side=tk.RIGHT, padx=5)
-        ttk.Label(export_frame, text="编码:").pack(side=tk.RIGHT, padx=5)
-
-        # --- 3. 制作JSON文件 ---
-        transjson_create_frame = ttk.Frame(functions_frame)
-        transjson_create_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(transjson_create_frame, text="3. 制作JSON文件", width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Label(transjson_create_frame, text="将StringScripts文本压缩为JSON").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(transjson_create_frame, text="执行", command=self.create_transjson_files).pack(side=tk.RIGHT, padx=5)
-
-        # --- 4. 生成世界观字典 (新增) ---
-        gen_dict_frame = ttk.Frame(functions_frame)
-        gen_dict_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(gen_dict_frame, text="4. 生成世界观字典", width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Label(gen_dict_frame, text="使用Gemini API从JSON原文生成字典CSV").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(gen_dict_frame, text="执行", command=self.generate_world_dict).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(gen_dict_frame, text="调整字典", command=self.edit_world_dict).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(gen_dict_frame, text="配置", command=self.open_world_dict_config).pack(side=tk.RIGHT, padx=5)
-
-        # --- 5. 翻译JSON文件 (新增) ---
-        trans_json_frame = ttk.Frame(functions_frame)
-        trans_json_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(trans_json_frame, text="5. 翻译JSON文件", width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Label(trans_json_frame, text="使用DeepSeek API翻译JSON文件").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(trans_json_frame, text="执行", command=self.translate_json_file).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(trans_json_frame, text="配置", command=self.open_translate_config).pack(side=tk.RIGHT, padx=5)
-
-        # --- 6. 释放JSON文件 ---
-        transjson_release_frame = ttk.Frame(functions_frame)
-        transjson_release_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(transjson_release_frame, text="6. 释放JSON文件", width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Label(transjson_release_frame, text="将已翻译JSON释放到StringScripts").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(transjson_release_frame, text="执行", command=self.release_transjson_files).pack(side=tk.RIGHT, padx=5)
-
-        # --- 7. 导入文本 ---
-        import_frame = ttk.Frame(functions_frame)
-        import_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(import_frame, text="7. 导入文本", width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Label(import_frame, text="将StringScripts文本导入到游戏中").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(import_frame, text="执行", command=self.import_text).pack(side=tk.RIGHT, padx=5)
-        import_encoding_combobox = ttk.Combobox(import_frame, textvariable=self.import_encoding, state="readonly", width=20)
-        import_encoding_combobox['values'] = [f"{name} - {code}" for name, code in encoding_options]
-        import_encoding_combobox.current(1)  # 默认选择中文
-        import_encoding_combobox.pack(side=tk.RIGHT, padx=5)
-        ttk.Label(import_frame, text="编码:").pack(side=tk.RIGHT, padx=5)
-
-        # 日志区域
+        # 日志区域 (放到状态栏上面)
         log_frame = ttk.LabelFrame(main_frame, text="操作日志", padding="5")
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.log_text = tk.Text(log_frame, wrap=tk.WORD, width=80, height=15)
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=5, side=tk.BOTTOM) # 明确放到下面，并扩展
+        self.log_text = tk.Text(log_frame, wrap=tk.WORD, width=80, height=10) # 高度可以根据需要调整
         scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -250,12 +194,161 @@ class RPGTranslationAssistant:
         self.log_text.tag_configure("error", foreground="red")
         self.log_text.config(state=tk.DISABLED)
 
-        # 状态栏
-        status_frame = ttk.Frame(main_frame)
-        status_frame.pack(fill=tk.X, pady=5)
-        self.status_var = tk.StringVar(value="就绪")
-        status_label = ttk.Label(status_frame, textvariable=self.status_var, anchor=tk.W)
-        status_label.pack(fill=tk.X)
+        # 功能区 Notebook (放到日志区上面, 路径选择下面)
+        self.functions_notebook = ttk.Notebook(main_frame)
+        self.functions_notebook.pack(fill=tk.X, expand=False, pady=5, side=tk.TOP) # 不垂直扩展，只水平填充
+        self.functions_notebook.bind("<<NotebookTabChanged>>", self.on_tab_change)
+
+        # --- 轻松模式框架 ---
+        # 注意：框架先定义，但添加到Notebook在后面
+        self.easy_mode_frame = ttk.Frame(self.functions_notebook, padding="10")
+
+        # 轻松模式按钮容器 (用于居中)
+        easy_button_container = ttk.Frame(self.easy_mode_frame)
+        easy_button_container.pack(pady=10) # 减少垂直外边距
+
+        ttk.Button(easy_button_container, text="Gemini配置", command=self.open_world_dict_config, width=15).pack(side=tk.LEFT, padx=10)
+        ttk.Button(easy_button_container, text="Deepseek配置", command=self.open_translate_config, width=15).pack(side=tk.LEFT, padx=10)
+        ttk.Button(easy_button_container, text="开始翻译", command=self.start_easy_translation, width=15).pack(side=tk.LEFT, padx=10)
+        ttk.Button(easy_button_container, text="开始游戏", command=self.start_game, width=15).pack(side=tk.LEFT, padx=10)
+
+        # 轻松模式进度条
+        self.easy_progressbar = ttk.Progressbar(self.easy_mode_frame, variable=self.easy_mode_progress_var, maximum=100)
+        self.easy_progressbar.pack(fill=tk.X, padx=10, pady=(10, 5))
+
+        # 轻松模式状态标签
+        self.easy_status_label = ttk.Label(self.easy_mode_frame, textvariable=self.easy_mode_status_var)
+        self.easy_status_label.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+
+        # --- 专业模式框架 ---
+        # 注意：框架先定义，但添加到Notebook在后面
+        self.pro_mode_frame = ttk.Frame(self.functions_notebook, padding="5")
+        functions_frame_pro = self.pro_mode_frame # 使用 pro_mode_frame 作为容器
+
+        # --- 0. 初始化 (放入专业模式) ---
+        init_frame = ttk.Frame(functions_frame_pro)
+        init_frame.pack(fill=tk.X, pady=2) # 减少专业模式内部垂直间距
+        ttk.Label(init_frame, text="0. 初始化", width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Label(init_frame, text="复制EasyRPG/RTP并转换编码").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(init_frame, text="执行", command=self.initialize_game).pack(side=tk.RIGHT, padx=5)
+        self.rtp_button_text = tk.StringVar() # 初始文本在下面更新
+        ttk.Button(init_frame, textvariable=self.rtp_button_text, command=self.show_rtp_selection).pack(side=tk.RIGHT, padx=5)
+        self._update_rtp_button_text() # 初始化时更新按钮文本
+
+        # --- 1. 重写文件名 (放入专业模式) ---
+        rename_frame = ttk.Frame(functions_frame_pro)
+        rename_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(rename_frame, text="1. 重写文件名", width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Label(rename_frame, text="非ASCII文件名转Unicode").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(rename_frame, text="执行", command=self.rename_files).pack(side=tk.RIGHT, padx=5)
+        self.write_log_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(rename_frame, text="输出日志", variable=self.write_log_var).pack(side=tk.RIGHT, padx=5)
+
+        # --- 2. 导出文本 (放入专业模式) ---
+        export_frame = ttk.Frame(functions_frame_pro)
+        export_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(export_frame, text="2. 导出文本", width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Label(export_frame, text="导出文本到StringScripts").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(export_frame, text="执行", command=self.export_text).pack(side=tk.RIGHT, padx=5)
+        encoding_options = [
+            ("日语 (Shift-JIS)", "932"), ("中文简体 (GBK)", "936"), ("中文繁体 (Big5)", "950"),
+            ("韩语 (EUC-KR)", "949"), ("泰语", "874"), ("拉丁语系 (西欧)", "1252"),
+            ("东欧", "1250"), ("西里尔字母", "1251")
+        ]
+        export_encoding_combobox = ttk.Combobox(export_frame, textvariable=self.export_encoding, state="readonly", width=20)
+        export_encoding_combobox['values'] = [f"{name} - {code}" for name, code in encoding_options]
+        current_export_code = self.export_encoding.get()
+        export_index = next((i for i, (_, code) in enumerate(encoding_options) if code == current_export_code), 0)
+        export_encoding_combobox.current(export_index)
+        export_encoding_combobox.pack(side=tk.RIGHT, padx=5)
+        ttk.Label(export_frame, text="编码:").pack(side=tk.RIGHT, padx=5)
+
+        # --- 3. 制作JSON文件 (放入专业模式) ---
+        transjson_create_frame = ttk.Frame(functions_frame_pro)
+        transjson_create_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(transjson_create_frame, text="3. 制作JSON文件", width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Label(transjson_create_frame, text="StringScripts文本压缩为JSON").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(transjson_create_frame, text="执行", command=self.create_transjson_files).pack(side=tk.RIGHT, padx=5)
+
+        # --- 4. 生成世界观字典 (放入专业模式) ---
+        gen_dict_frame = ttk.Frame(functions_frame_pro)
+        gen_dict_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(gen_dict_frame, text="4. 生成世界观字典", width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Label(gen_dict_frame, text="Gemini API从JSON生成字典").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(gen_dict_frame, text="执行", command=self.generate_world_dict).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(gen_dict_frame, text="调整字典", command=self.edit_world_dict).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(gen_dict_frame, text="配置", command=self.open_world_dict_config).pack(side=tk.RIGHT, padx=5)
+
+        # --- 5. 翻译JSON文件 (放入专业模式) ---
+        trans_json_frame = ttk.Frame(functions_frame_pro)
+        trans_json_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(trans_json_frame, text="5. 翻译JSON文件", width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Label(trans_json_frame, text="DeepSeek API翻译JSON").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(trans_json_frame, text="执行", command=self.translate_json_file).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(trans_json_frame, text="配置", command=self.open_translate_config).pack(side=tk.RIGHT, padx=5)
+
+        # --- 6. 释放JSON文件 (放入专业模式) ---
+        transjson_release_frame = ttk.Frame(functions_frame_pro)
+        transjson_release_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(transjson_release_frame, text="6. 释放JSON文件", width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Label(transjson_release_frame, text="翻译后JSON释放到StringScripts").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(transjson_release_frame, text="执行", command=self.release_transjson_files).pack(side=tk.RIGHT, padx=5)
+
+        # --- 7. 导入文本 (放入专业模式) ---
+        import_frame = ttk.Frame(functions_frame_pro)
+        import_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(import_frame, text="7. 导入文本", width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Label(import_frame, text="StringScripts文本导入游戏").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(import_frame, text="执行", command=self.import_text).pack(side=tk.RIGHT, padx=5)
+        import_encoding_combobox = ttk.Combobox(import_frame, textvariable=self.import_encoding, state="readonly", width=20)
+        import_encoding_combobox['values'] = [f"{name} - {code}" for name, code in encoding_options]
+        current_import_code = self.import_encoding.get()
+        import_index = next((i for i, (_, code) in enumerate(encoding_options) if code == current_import_code), 1) # 默认中文
+        import_encoding_combobox.current(import_index)
+        import_encoding_combobox.pack(side=tk.RIGHT, padx=5)
+        ttk.Label(import_frame, text="编码:").pack(side=tk.RIGHT, padx=5)
+
+        # --- 将模式框架添加到Notebook ---
+        # 必须在Notebook pack之后添加
+        self.functions_notebook.add(self.easy_mode_frame, text="轻松模式")
+        self.functions_notebook.add(self.pro_mode_frame, text="专业模式")
+
+        # --- 选择初始标签 ---
+        initial_mode = self.selected_mode.get()
+        if initial_mode == "easy":
+            self.functions_notebook.select(self.easy_mode_frame)
+        else:
+            self.functions_notebook.select(self.pro_mode_frame)
+    
+    def on_tab_change(self, event):
+        """处理Notebook标签切换事件"""
+        selected_tab_text = self.functions_notebook.tab(self.functions_notebook.select(), "text")
+        new_mode = "easy" if selected_tab_text == "轻松模式" else "pro"
+        if new_mode != self.selected_mode.get():
+            self.selected_mode.set(new_mode)
+            self.log(f"切换到 {selected_tab_text}")
+            self._update_window_size(new_mode)
+            # 可以在这里保存配置，如果希望每次切换都保存的话
+            self.save_config()
+
+    def _update_window_size(self, mode):
+        """根据模式调整窗口高度"""
+        current_width = self.root.winfo_width()
+        target_width = max(current_width, 800) # 确保宽度不小于800
+
+        if mode == "easy":
+            new_height = 450 # 轻松模式高度
+        else: # pro mode
+            new_height = 750 # 专业模式高度
+
+        # 尝试平滑调整大小（可能效果不明显）
+        # self.root.geometry(f"{target_width}x{new_height}+{self.root.winfo_x()}+{self.root.winfo_y()}")
+        # 使用 update_idletasks 确保几何计算准确
+        self.root.update_idletasks()
+        self.root.geometry(f"{target_width}x{new_height}")
+        # 调整功能区框架的扩展行为
+        # self.functions_notebook.pack_configure(expand=(mode == 'pro')) # 专业模式下扩展填充
 
     # --- 日志和状态更新方法 ---
     def log(self, message, level="normal"):
@@ -304,17 +397,32 @@ class RPGTranslationAssistant:
                     level, text = content
                     self.log(text, level)
                 elif message_type == "status":
-                    self.status_var.set(content)
+                    self.status_var.set(content) # 更新底部状态栏
                 elif message_type == "success":
                     self.show_success(content)
                 elif message_type == "error":
                     self.show_error(content)
                 elif message_type == "done":
                     self.is_processing = False
+                    # 如果当前是轻松模式，并且没有错误，可以重置进度条？或者保持完成状态
+                    # if self.selected_mode.get() == 'easy' and not self.status_var.get().startswith("Error"):
+                    #     pass # 保留 100%
+                # --- 新增：处理轻松模式进度 ---
+                elif message_type == "progress":
+                    # 确保进度条控件存在
+                    if hasattr(self, 'easy_progressbar') and self.easy_progressbar.winfo_exists():
+                        self.easy_mode_progress_var.set(content)
+                # --- 新增：处理轻松模式状态标签 ---
+                elif message_type == "easy_status":
+                     # 确保状态标签控件存在
+                    if hasattr(self, 'easy_status_label') and self.easy_status_label.winfo_exists():
+                        self.easy_mode_status_var.set(content)
+
                 self.message_queue.task_done()
         except queue.Empty:
             pass
-        self.root.after(100, self.process_messages)
+        finally: # 使用 finally 确保 after 总能被调用
+            self.root.after(100, self.process_messages) # 保持循环检查
 
     def thread_log(self, message, level="normal"):
         self.message_queue.put(("log", (level, message)))
@@ -1295,8 +1403,118 @@ class RPGTranslationAssistant:
         except Exception as e:
             self.thread_update_status("文本导入过程中出错")
             self.thread_show_error(f"文本导入过程中出错: {str(e)}")
+    
+    # --- 新增：轻松模式 - 开始翻译 ---
+    def start_easy_translation(self):
+        """执行轻松模式下的自动翻译流程"""
+        if not self.check_game_path():
+            return
+        # 检查API配置是否填写（简单检查Key）
+        if not self.world_dict_config.get("api_key"):
+             messagebox.showwarning("配置缺失", "请先在“Gemini配置”中填写API Key。")
+             return
+        if not self.translate_config.get("api_key") or not self.translate_config.get("api_url"):
+             messagebox.showwarning("配置缺失", "请先在“Deepseek配置”中填写API URL和API Key。")
+             return
+
+        # 重置进度和状态
+        self.easy_mode_progress_var.set(0.0)
+        self.easy_mode_status_var.set("准备开始...")
+        self.run_in_thread(self._run_easy_mode_sequence)
+
+    def _run_easy_mode_sequence(self):
+        """在线程中按顺序执行所有翻译步骤"""
+        steps = [
+            ("初始化", self._initialize_game),
+            ("重写文件名", self._rename_files),
+            ("导出文本", self._export_text),
+            ("制作JSON文件", self._create_transjson_files),
+            ("生成世界观字典", self._generate_world_dict),
+            ("翻译JSON文件", self._translate_json),
+            ("释放JSON文件", self._release_transjson_files),
+            ("导入文本", self._import_text),
+        ]
+        total_steps = len(steps)
+        current_step_num = 0
+
+        try:
+            for name, func in steps:
+                current_step_num += 1
+                self.thread_update_status(f"({current_step_num}/{total_steps}) 正在执行: {name}...")
+                self.message_queue.put(("easy_status", f"({current_step_num}/{total_steps}) 正在执行: {name}..."))
+
+                # 调用实际的步骤函数
+                func() # 这些函数内部会处理日志和错误
+
+                # 更新进度条 (放在成功完成一步后)
+                progress_value = (current_step_num / total_steps) * 100
+                self.message_queue.put(("progress", progress_value))
+                self.thread_log(f"步骤 '{name}' 完成。")
+
+            self.thread_update_status("轻松模式翻译流程完成！")
+            self.message_queue.put(("easy_status", "轻松模式翻译流程完成！"))
+            self.thread_show_success("所有步骤已成功完成。")
+
+        except Exception as e:
+            # 错误已在 run_in_thread 的 wrapper 中捕获并记录
+            # 这里仅更新轻松模式的状态标签
+            failed_step_name = steps[current_step_num - 1][0] if current_step_num > 0 else "未知步骤"
+            error_msg = f"在步骤 '{failed_step_name}' 中止 ({current_step_num}/{total_steps})"
+            self.message_queue.put(("easy_status", error_msg))
+            # 标记进度条为不确定或红色（可选，当前只停止）
+            # self.message_queue.put(("progress_error", True)) # 示例：发送错误信号
+            # 注意：run_in_thread 已经记录了详细错误
+
+    # --- 新增：轻松模式 - 开始游戏 ---
+    def start_game(self):
+        """尝试运行游戏目录下的Player.exe"""
+        if not self.check_game_path():
+            return
+
+        game_path = self.game_path.get()
+        player_exe_path = os.path.join(game_path, "Player.exe") # EasyRPG Player 可执行文件
+
+        if not os.path.exists(player_exe_path):
+            # 尝试查找 RPG_RT.exe 作为备选
+            player_exe_path = os.path.join(game_path, "RPG_RT.exe")
+            if not os.path.exists(player_exe_path):
+                self.show_error(f"未在游戏目录中找到 Player.exe 或 RPG_RT.exe")
+                messagebox.showerror("启动失败", f"未在以下路径找到 Player.exe 或 RPG_RT.exe：\n{game_path}")
+                return
+
+        self.log(f"正在尝试启动游戏: {player_exe_path}")
+        try:
+            # 使用 Popen 在后台启动，不阻塞UI
+            # 在Windows上，如果路径包含空格，可能需要引号，但 os.path.join 通常能处理
+            # 注意：cwd 设置为游戏目录，确保游戏能正确加载资源
+            subprocess.Popen([player_exe_path], cwd=game_path)
+            self.show_success("游戏已启动（在单独的进程中）")
+        except FileNotFoundError:
+             self.show_error(f"启动失败: 未找到文件 {player_exe_path}")
+             messagebox.showerror("启动失败", f"无法启动游戏，未找到文件：\n{player_exe_path}")
+        except OSError as e:
+            self.show_error(f"启动游戏时发生错误: {e}")
+            messagebox.showerror("启动失败", f"启动游戏时发生操作系统错误：\n{e}")
+        except Exception as e:
+            self.show_error(f"启动游戏时发生未知错误: {e}")
+            messagebox.showerror("启动失败", f"启动游戏时发生未知错误：\n{e}")
 
     # --- RTP选择方法---
+    def _update_rtp_button_text(self):
+        """根据当前选择更新RTP按钮文本"""
+        selected_rtps = []
+        if self.rtp_2000.get(): selected_rtps.append("2000")
+        if self.rtp_2000en.get(): selected_rtps.append("2000en")
+        if self.rtp_2003.get(): selected_rtps.append("2003")
+        if self.rtp_2003steam.get(): selected_rtps.append("2003steam")
+
+        if not selected_rtps:
+            self.rtp_button_text.set("RTP选择: 无")
+        elif len(selected_rtps) == 1:
+            self.rtp_button_text.set(f"RTP选择: {selected_rtps[0]}")
+        else:
+            self.rtp_button_text.set(f"RTP选择: {len(selected_rtps)}个")
+
     def show_rtp_selection(self):
         rtp_window = tk.Toplevel(self.root)
         rtp_window.title("选择RTP")
@@ -1304,9 +1522,18 @@ class RPGTranslationAssistant:
         rtp_window.transient(self.root)
         rtp_window.grab_set()
         rtp_window.resizable(False, False)
-        x = self.root.winfo_rootx() + self.root.winfo_width() - 300
-        y = self.root.winfo_rooty() + 150
-        rtp_window.geometry(f"+{x}+{y}")
+
+        # 尝试将窗口定位在按钮附近 (可能需要微调)
+        try:
+            # 找到RTP按钮的位置来定位窗口，需要按钮可见
+            # 这部分逻辑比较复杂，可能需要按钮实际渲染后才能获取位置
+            # 暂时简化为屏幕相对位置
+            x = self.root.winfo_rootx() + self.root.winfo_width() - 550 # 调整 X 偏移
+            y = self.root.winfo_rooty() + 150 # 调整 Y 偏移
+            rtp_window.geometry(f"+{x}+{y}")
+        except: # 防御性编程，如果获取位置失败则忽略
+            pass
+
         frame = ttk.Frame(rtp_window, padding="10")
         frame.pack(fill=tk.BOTH, expand=True)
         ttk.Label(frame, text="选择要安装的RTP文件:").pack(anchor=tk.W, pady=(0, 5))
@@ -1314,18 +1541,13 @@ class RPGTranslationAssistant:
         ttk.Checkbutton(frame, text="RPG Maker 2000 (英文版)", variable=self.rtp_2000en).pack(anchor=tk.W, pady=2)
         ttk.Checkbutton(frame, text="RPG Maker 2003", variable=self.rtp_2003).pack(anchor=tk.W, pady=2)
         ttk.Checkbutton(frame, text="RPG Maker 2003 (Steam版)", variable=self.rtp_2003steam).pack(anchor=tk.W, pady=2)
-        def on_confirm():
-            selected_rtps = []
-            if self.rtp_2000.get(): selected_rtps.append("2000")
-            if self.rtp_2000en.get(): selected_rtps.append("2000en")
-            if self.rtp_2003.get(): selected_rtps.append("2003")
-            if self.rtp_2003steam.get(): selected_rtps.append("2003steam")
-            if not selected_rtps: self.rtp_button_text.set("RTP选择: 无")
-            elif len(selected_rtps) == 1: self.rtp_button_text.set(f"RTP选择: {selected_rtps[0]}")
-            else: self.rtp_button_text.set(f"RTP选择: {len(selected_rtps)}个")
-            rtp_window.destroy()
-        ttk.Button(frame, text="确定", command=on_confirm).pack(anchor=tk.CENTER, pady=(10, 0))
 
+        def on_confirm():
+            self._update_rtp_button_text() # 调用更新函数
+            rtp_window.destroy()
+
+        ttk.Button(frame, text="确定", command=on_confirm).pack(anchor=tk.CENTER, pady=(10, 0))
+    
     # --- 配置窗口打开方法 ---
     def edit_world_dict(self):
         """打开世界观字典表格编辑器"""
@@ -1485,6 +1707,7 @@ class RPGTranslationAssistant:
 class WorldDictConfigWindow(tk.Toplevel):
     def __init__(self, parent_app, config): # 传入主应用实例 parent_app
         super().__init__(parent_app.root) # 父窗口是主应用的 root
+        self.initializing = True
         self.parent_app = parent_app
         self.config = config
         self.initial_config = config.copy() # 保存初始配置用于比较
@@ -1517,18 +1740,18 @@ class WorldDictConfigWindow(tk.Toplevel):
         self.model_var = tk.StringVar(value=config.get("model", "gemini-2.5-pro-exp-03-25"))
         # 提供一些常用的Gemini模型选项
         model_combobox = ttk.Combobox(model_frame, textvariable=self.model_var, values=[
-            "gemini-1.5-pro-latest",
             "gemini-2.5-pro-exp-03-25",
+            "gemini-1.5-pro-latest",
             "gemini-pro", # 旧版Pro
         ], width=48)
         model_combobox.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
 
         # Prompt
         prompt_frame = ttk.LabelFrame(frame, text="Prompt", padding="5")
         prompt_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         self.prompt_text = tk.Text(prompt_frame, wrap=tk.WORD, height=15)
         self.prompt_text.insert(tk.END, config.get("prompt", ""))
+        self.prompt_text.edit_modified(False)
         prompt_scroll = ttk.Scrollbar(prompt_frame, command=self.prompt_text.yview)
         self.prompt_text.configure(yscrollcommand=prompt_scroll.set)
         prompt_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1553,6 +1776,9 @@ class WorldDictConfigWindow(tk.Toplevel):
         self.model_var.trace_add("write", self.on_config_change)
         self.prompt_text.bind("<<Modified>>", self.on_prompt_change)
 
+        # --- 新增：初始化完成 ---
+        self.initializing = False
+
         # 检查初始状态，如果key存在，提示测试
         if self.api_key_var.get():
              self.set_status("配置已加载，请测试连接", "orange")
@@ -1568,12 +1794,18 @@ class WorldDictConfigWindow(tk.Toplevel):
 
     def on_prompt_change(self, event=None):
         """处理Prompt文本框的修改事件"""
+        # --- 新增：检查初始化标志 ---
+        if self.initializing:
+            return
         # Text控件的Modified事件比较特殊，需要重置标志位
         self.prompt_text.edit_modified(False)
         self.on_config_change()
 
     def on_config_change(self, *args):
         """配置发生变化时的处理"""
+        # --- 新增：检查初始化标志 ---
+        if self.initializing:
+            return
         self.connection_tested_ok = False
         self.save_button.config(state=tk.DISABLED)
         self.set_status("配置已更改，请重新测试连接", "orange")
@@ -1668,6 +1900,7 @@ class WorldDictConfigWindow(tk.Toplevel):
 class TranslateConfigWindow(tk.Toplevel):
     def __init__(self, parent_app, config): # 传入主应用实例 parent_app
         super().__init__(parent_app.root) # 父窗口是主应用的 root
+        self.initializing = True
         self.parent_app = parent_app
         self.config = config
         self.initial_config = config.copy() # 保存初始配置用于比较
@@ -1770,6 +2003,7 @@ class TranslateConfigWindow(tk.Toplevel):
         prompt_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         self.prompt_text = scrolledtext.ScrolledText(prompt_frame, wrap=tk.WORD, height=5)
         self.prompt_text.insert(tk.END, config.get("prompt_template", ""))
+        self.prompt_text.edit_modified(False)
         self.prompt_text.pack(fill=tk.BOTH, expand=True)
         self.prompt_text.bind("<<Modified>>", self.on_prompt_change)
 
@@ -1797,8 +2031,14 @@ class TranslateConfigWindow(tk.Toplevel):
         self.source_lang_var.trace_add("write", self.on_config_change)
         self.target_lang_var.trace_add("write", self.on_config_change)
 
+        # --- 新增：初始化完成 ---
+        self.initializing = False
+
     def on_prompt_change(self, event=None):
         """处理Prompt文本的修改事件"""
+        # --- 新增：检查初始化标志 ---
+        if self.initializing:
+            return
         if hasattr(self, 'prompt_text'):
             # Text控件的Modified事件需要重置标志位
             self.prompt_text.edit_modified(False)
@@ -1819,6 +2059,9 @@ class TranslateConfigWindow(tk.Toplevel):
 
     def on_config_change(self, *args):
         """配置发生变化时的处理"""
+        # --- 新增：检查初始化标志 ---
+        if self.initializing:
+            return
         # Spinbox 的 trace 可能触发多次，简单处理
         if not hasattr(self, 'save_button') or not self.save_button.winfo_exists():
              return # 防止窗口销毁后还触发trace
