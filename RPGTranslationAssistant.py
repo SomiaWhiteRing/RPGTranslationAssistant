@@ -207,6 +207,7 @@ class RPGTranslationAssistant:
         ttk.Label(gen_dict_frame, text="4. 生成世界观字典", width=15).pack(side=tk.LEFT, padx=5)
         ttk.Label(gen_dict_frame, text="使用Gemini API从JSON原文生成字典CSV").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         ttk.Button(gen_dict_frame, text="执行", command=self.generate_world_dict).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(gen_dict_frame, text="调整字典", command=self.edit_world_dict).pack(side=tk.RIGHT, padx=5)
         ttk.Button(gen_dict_frame, text="配置", command=self.open_world_dict_config).pack(side=tk.RIGHT, padx=5)
 
         # --- 5. 翻译JSON文件 (新增) ---
@@ -1326,6 +1327,154 @@ class RPGTranslationAssistant:
         ttk.Button(frame, text="确定", command=on_confirm).pack(anchor=tk.CENTER, pady=(10, 0))
 
     # --- 配置窗口打开方法 ---
+    def edit_world_dict(self):
+        """打开世界观字典表格编辑器"""
+        game_path = self.game_path.get()
+        if not game_path:
+            self.show_error("请先选择游戏目录")
+            return
+            
+        game_folder_name = os.path.basename(game_path)
+        work_dir = os.path.join(self.works_dir, game_folder_name)
+        dict_csv_path = os.path.join(work_dir, "world_dictionary.csv")
+        
+        # 如果目录不存在则创建
+        os.makedirs(work_dir, exist_ok=True)
+        
+        # 如果文件不存在则创建空字典
+        if not os.path.exists(dict_csv_path):
+            with open(dict_csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['原文', '译文', '类别', '描述'])
+            self.show_success("已创建新的空字典文件")
+            
+        try:
+            # 读取CSV文件内容
+            with open(dict_csv_path, 'r', encoding='utf-8-sig', newline='') as f:
+                reader = csv.reader(f)
+                data = list(reader)
+                
+            # 创建表格编辑器窗口
+            edit_window = tk.Toplevel(self.root)
+            edit_window.title("世界观字典编辑器")
+            edit_window.geometry("1000x600")
+            
+            # 表格框架
+            table_frame = ttk.Frame(edit_window)
+            table_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            
+            # 表格（启用编辑）
+            self.dict_table = ttk.Treeview(table_frame, columns=('original', 'translation', 'category', 'description'), 
+                                         show='headings', selectmode='extended')
+            
+            # 绑定双击编辑事件
+            self.dict_table.bind('<Double-1>', self.on_cell_edit)
+            
+            # 设置列标题
+            self.dict_table.heading('original', text='原文')
+            self.dict_table.heading('translation', text='译文')
+            self.dict_table.heading('category', text='类别')
+            self.dict_table.heading('description', text='描述')
+            
+            # 设置列宽
+            self.dict_table.column('original', width=200, anchor='w')
+            self.dict_table.column('translation', width=200, anchor='w')
+            self.dict_table.column('category', width=100, anchor='w')
+            self.dict_table.column('description', width=400, anchor='w')
+            
+            # 添加滚动条
+            scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.dict_table.yview)
+            self.dict_table.configure(yscrollcommand=scrollbar.set)
+            scrollbar.pack(side="right", fill="y")
+            self.dict_table.pack(fill="both", expand=True)
+            
+            # 填充数据(跳过表头行但保持可编辑)
+            if data:  # 确保有数据
+                for row in data[1:]:  # 跳过第一行表头
+                    item = self.dict_table.insert('', 'end', values=row)
+                    # 为每列设置可编辑状态
+                    for i, col in enumerate(['original', 'translation', 'category', 'description']):
+                        self.dict_table.set(item, col, row[i])
+                
+            # 按钮区域
+            button_frame = ttk.Frame(edit_window)
+            button_frame.pack(fill=tk.X, padx=5, pady=5)
+            
+            # 添加行按钮
+            ttk.Button(button_frame, text="添加行", command=lambda: self.dict_table.insert('', 'end', values=['','','',''])).pack(side=tk.LEFT, padx=5)
+            
+            # 删除行按钮
+            ttk.Button(button_frame, text="删除行", command=lambda: self.dict_table.delete(self.dict_table.selection()[0]) 
+                      if self.dict_table.selection() else None).pack(side=tk.LEFT, padx=5)
+            
+            # 保存按钮
+            ttk.Button(button_frame, text="保存", command=lambda: self.save_dict_table(dict_csv_path, edit_window)).pack(side=tk.RIGHT, padx=5)
+            
+            # 取消按钮
+            ttk.Button(button_frame, text="取消", command=edit_window.destroy).pack(side=tk.RIGHT, padx=5)
+            
+        except Exception as e:
+            self.show_error(f"打开字典编辑器失败: {str(e)}")
+
+    def on_cell_edit(self, event):
+        """处理单元格编辑"""
+        region = self.dict_table.identify('region', event.x, event.y)
+        if region != 'cell':
+            return
+            
+        column = self.dict_table.identify_column(event.x)
+        item = self.dict_table.identify_row(event.y)
+        
+        if not item or not column:
+            return
+            
+        # 获取当前值
+        col_index = int(column[1:]) - 1
+        current_values = list(self.dict_table.item(item, 'values'))
+        current_value = current_values[col_index]
+        
+        # 创建编辑框
+        entry = ttk.Entry(self.dict_table)
+        entry.insert(0, current_value)
+        entry.select_range(0, tk.END)
+        entry.focus()
+        
+        def save_edit(event):
+            new_value = entry.get()
+            current_values[col_index] = new_value
+            self.dict_table.item(item, values=current_values)
+            entry.destroy()
+            
+        entry.bind('<Return>', save_edit)
+        entry.bind('<FocusOut>', lambda e: entry.destroy())
+        
+        # 定位并显示编辑框
+        x, y, width, height = self.dict_table.bbox(item, column)
+        entry.place(x=x, y=y, width=width, height=height)
+
+    def save_dict_table(self, dict_path, window):
+        """保存表格编辑器中的字典内容"""
+        try:
+            # 获取表格中的所有数据
+            data = []
+            # 添加表头行
+            headers = ['原文', '译文', '类别', '描述']
+            data.append(headers)
+            
+            # 添加数据行
+            for child in self.dict_table.get_children():
+                data.append(self.dict_table.item(child)['values'])
+                
+            # 写入CSV文件
+            with open(dict_path, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerows(data)
+                
+            self.show_success("字典已保存")
+            window.destroy()
+        except Exception as e:
+            self.show_error(f"保存字典失败: {str(e)}")
+
     def open_world_dict_config(self):
         WorldDictConfigWindow(self, self.world_dict_config)
 
