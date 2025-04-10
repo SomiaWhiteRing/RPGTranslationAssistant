@@ -86,6 +86,8 @@ class RPGTranslationAssistant:
             "batch_size": 10,
             "context_lines": 10,
             "concurrency": 16,
+            "source_language": "日语",  # 新增：源语言配置
+            "target_language": "简体中文",  # 新增：目标语言配置
             "prompt_template": """你是一名专业的翻译家，你的任务是把{source_language}文本翻译成{target_language}，逐行翻译，不要合并，保留文本中序号、标记符、占位符、换行符等特殊内容，保持原来的格式。
 
 ### 翻译原则
@@ -871,8 +873,8 @@ class RPGTranslationAssistant:
         context_lines = self.translate_config.get("context_lines", 10)
         concurrency = self.translate_config.get("concurrency", 16)
         prompt_template = self.translate_config.get("prompt_template")
-        source_language = "日语" # 假设源语言总是日语
-        target_language = "简体中文" # 假设目标总是简体中文
+        source_language = self.translate_config.get("source_language", "日语")
+        target_language = self.translate_config.get("target_language", "简体中文")
 
         self.thread_log(f"翻译配置:")
         self.thread_log(f"- API URL: {api_url}")
@@ -1590,13 +1592,37 @@ class TranslateConfigWindow(tk.Toplevel):
         self.concur_spinbox = ttk.Spinbox(concur_frame, from_=1, to=64, textvariable=self.concur_var, width=5)
         self.concur_spinbox.pack(side=tk.LEFT)
 
-        # Prompt Template (只读显示)
-        prompt_frame = ttk.LabelFrame(frame, text="Prompt 模板 (只读)", padding="5")
+        # 语言选择
+        lang_frame = ttk.Frame(frame)
+        lang_frame.pack(fill=tk.X, pady=5)
+
+        # 源语言
+        source_lang_frame = ttk.Frame(lang_frame)
+        source_lang_frame.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Label(source_lang_frame, text="源语言:", width=8).pack(side=tk.LEFT)
+        self.source_lang_var = tk.StringVar(value=config.get("source_language", "日语"))
+        source_lang_combobox = ttk.Combobox(source_lang_frame, textvariable=self.source_lang_var, values=[
+            "日语", "英语", "韩语", "俄语", "法语", "德语", "西班牙语"
+        ], width=15)
+        source_lang_combobox.pack(side=tk.LEFT, padx=5)
+
+        # 目标语言
+        target_lang_frame = ttk.Frame(lang_frame)
+        target_lang_frame.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Label(target_lang_frame, text="目标语言:", width=8).pack(side=tk.LEFT)
+        self.target_lang_var = tk.StringVar(value=config.get("target_language", "简体中文"))
+        target_lang_combobox = ttk.Combobox(target_lang_frame, textvariable=self.target_lang_var, values=[
+            "简体中文", "繁体中文", "英语", "日语", "韩语", "俄语", "法语", "德语", "西班牙语"
+        ], width=15)
+        target_lang_combobox.pack(side=tk.LEFT, padx=5)
+
+        # Prompt Template
+        prompt_frame = ttk.LabelFrame(frame, text="Prompt 模板", padding="5")
         prompt_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        prompt_display = scrolledtext.ScrolledText(prompt_frame, wrap=tk.WORD, height=5)
-        prompt_display.insert(tk.END, config.get("prompt_template", ""))
-        prompt_display.config(state=tk.DISABLED)
-        prompt_display.pack(fill=tk.BOTH, expand=True)
+        self.prompt_text = scrolledtext.ScrolledText(prompt_frame, wrap=tk.WORD, height=5)
+        self.prompt_text.insert(tk.END, config.get("prompt_template", ""))
+        self.prompt_text.pack(fill=tk.BOTH, expand=True)
+        self.prompt_text.bind("<<Modified>>", self.on_prompt_change)
 
         # 状态标签
         self.status_var = tk.StringVar(value="请先测试连接")
@@ -1619,6 +1645,15 @@ class TranslateConfigWindow(tk.Toplevel):
         self.batch_var.trace_add("write", self.on_config_change)
         self.context_var.trace_add("write", self.on_config_change)
         self.concur_var.trace_add("write", self.on_config_change)
+        self.source_lang_var.trace_add("write", self.on_config_change)
+        self.target_lang_var.trace_add("write", self.on_config_change)
+
+    def on_prompt_change(self, event=None):
+        """处理Prompt文本的修改事件"""
+        if hasattr(self, 'prompt_text'):
+            # Text控件的Modified事件需要重置标志位
+            self.prompt_text.edit_modified(False)
+            self.on_config_change()
 
         # 检查初始状态
         if self.api_key_var.get() and self.api_url_var.get():
@@ -1717,7 +1752,9 @@ class TranslateConfigWindow(tk.Toplevel):
         self.config["batch_size"] = self.batch_var.get()
         self.config["context_lines"] = self.context_var.get()
         self.config["concurrency"] = self.concur_var.get()
-        # Prompt 模板通常不在此处修改
+        self.config["source_language"] = self.source_lang_var.get()
+        self.config["target_language"] = self.target_lang_var.get()
+        self.config["prompt_template"] = self.prompt_text.get("1.0", tk.END).strip()
 
         # 调用主应用的保存方法
         self.parent_app.save_config()
