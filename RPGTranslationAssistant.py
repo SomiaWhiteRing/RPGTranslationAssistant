@@ -424,18 +424,18 @@ class RPGTranslationAssistant:
                 file_path = os.path.join(game_path, item)
                 if os.path.isfile(file_path) and (file_path.lower().endswith('.txt') or file_path.lower().endswith('.ini')):
                     try:
-                        with open(file_path, 'r', encoding='utf-8') as file: file.read()
-                        self.thread_log(f"跳过已是UTF-8的文件: {item}")
+                        with open(file_path, 'r', encoding='gbk') as file: file.read()
+                        self.thread_log(f"跳过已是GBK的文件: {item}")
                         skipped_conversions += 1
                         continue
                     except UnicodeDecodeError: pass
-                    encodings = ['Shift_JIS', 'gbk', 'cp932', 'latin1']
+                    encodings = ['Shift_JIS', 'cp932', 'latin1']
                     converted = False
                     for encoding in encodings:
                         try:
                             with open(file_path, 'r', encoding=encoding) as file: content = file.read()
-                            with open(file_path, 'w', encoding='utf-8') as file: file.write(content)
-                            self.thread_log(f"成功转换文件: {item} ({encoding} -> UTF-8)")
+                            with open(file_path, 'w', encoding='gbk') as file: file.write(content)
+                            self.thread_log(f"成功转换文件: {item} ({encoding} -> GBK)")
                             converted = True
                             converted_files += 1
                             break
@@ -443,7 +443,7 @@ class RPGTranslationAssistant:
                     if not converted:
                         self.thread_log(f"转换文件失败: {item}", "error")
                         failed_conversions += 1
-            self.thread_log(f"编码转换完成: 转换 {converted_files} 个文件，跳过 {skipped_conversions} 个已是UTF-8的文件，失败 {failed_conversions} 个文件")
+            self.thread_log(f"编码转换完成: 转换 {converted_files} 个文件，跳过 {skipped_conversions} 个已是GBK的文件，失败 {failed_conversions} 个文件")
 
             self.thread_update_status("初始化完成")
             self.thread_show_success(f"游戏初始化完成")
