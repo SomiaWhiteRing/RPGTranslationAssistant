@@ -7,6 +7,7 @@ import json
 import re
 import csv
 import io
+import time
 import datetime
 import threading
 import queue
@@ -20,7 +21,7 @@ class RPGTranslationAssistant:
     def __init__(self, root):
         self.root = root
         self.root.title("RPG Maker 翻译助手")
-        # self.root.geometry("800x750") # 初始大小由模式决定
+        # self.root.geometry("600x750") # 初始大小由模式决定
         self.root.resizable(True, True)
 
         # 设置程序路径
@@ -67,6 +68,13 @@ class RPGTranslationAssistant:
         self.config_file_path = os.path.join(self.program_dir, "app_config.json")
         self.load_config() # 加载现有配置或设置默认值
 
+        # --- 选择初始标签 ---
+        initial_mode = self.selected_mode.get()
+        if initial_mode == "easy":
+            self.functions_notebook.select(self.easy_mode_frame)
+        else:
+            self.functions_notebook.select(self.pro_mode_frame)
+
         # 根据加载的模式设置初始窗口大小
         self._update_window_size(self.selected_mode.get())
 
@@ -108,6 +116,10 @@ class RPGTranslationAssistant:
 {glossary_section}
 
 {context_section}
+
+### 特殊字符处理规则
+- 你在原文中可能会看到特殊字符，如 , , 。
+- 这些是重要的占位符，**必须**在译文中原样保留，**禁止**修改、删除或翻译它们。
 
 ### 这是你接下来的翻译任务，原文文本如下
 <textarea>
@@ -171,9 +183,9 @@ class RPGTranslationAssistant:
         # 游戏路径选择 (保持不变)
         path_frame = ttk.LabelFrame(main_frame, text="游戏路径", padding="5")
         path_frame.pack(fill=tk.X, pady=5, side=tk.TOP) # 明确放到顶部
+        ttk.Button(path_frame, text="浏览...", command=self.browse_game_path).pack(side=tk.RIGHT, padx=5, pady=5)
         ttk.Entry(path_frame, textvariable=self.game_path, width=70).pack(side=tk.LEFT, padx=5, pady=5, fill=tk.X, expand=True)
-        ttk.Button(path_frame, text="浏览...", command=self.browse_game_path).pack(side=tk.LEFT, padx=5, pady=5)
-
+        
         # 状态栏 (先定义，放到最下面)
         status_frame = ttk.Frame(main_frame)
         status_frame.pack(fill=tk.X, pady=5, side=tk.BOTTOM)
@@ -313,13 +325,6 @@ class RPGTranslationAssistant:
         # 必须在Notebook pack之后添加
         self.functions_notebook.add(self.easy_mode_frame, text="轻松模式")
         self.functions_notebook.add(self.pro_mode_frame, text="专业模式")
-
-        # --- 选择初始标签 ---
-        initial_mode = self.selected_mode.get()
-        if initial_mode == "easy":
-            self.functions_notebook.select(self.easy_mode_frame)
-        else:
-            self.functions_notebook.select(self.pro_mode_frame)
     
     def on_tab_change(self, event):
         """处理Notebook标签切换事件"""
@@ -335,7 +340,7 @@ class RPGTranslationAssistant:
     def _update_window_size(self, mode):
         """根据模式调整窗口高度"""
         current_width = self.root.winfo_width()
-        target_width = max(current_width, 800) # 确保宽度不小于800
+        target_width = max(current_width, 600) # 确保宽度不小于600
 
         if mode == "easy":
             new_height = 450 # 轻松模式高度
@@ -525,33 +530,182 @@ class RPGTranslationAssistant:
 
             # ... (转换文本编码的代码，使用 self.thread_log) ...
             self.thread_log("正在转换文本文件编码...")
-            converted_files = 0
-            skipped_conversions = 0
-            failed_conversions = 0
+            processed_files = 0
+            corrected_or_converted = 0
+
+            japanese_encodings = ['shift_jis', 'cp932']
+            kana_pattern = re.compile(r'[\u3040-\u30FF]')
+
             for item in os.listdir(game_path):
                 file_path = os.path.join(game_path, item)
-                if os.path.isfile(file_path) and (file_path.lower().endswith('.txt') or file_path.lower().endswith('.ini')):
+                if not (os.path.isfile(file_path) and (item.lower().endswith('.txt') or item.lower().endswith('.ini'))):
+                    continue
+
+                processed_files += 1
+
+                with open(file_path, 'rb') as f_bytes:
+                    raw_content = f_bytes.read()
+                if not raw_content:
+                    self.thread_log(f"跳过空文件: {item}", "normal")
+                    continue
+
+                needs_conversion = False
+                decoded_content = None
+                encoding_used = None
+
+                for encoding in japanese_encodings:
                     try:
-                        with open(file_path, 'r', encoding='gbk') as file: file.read()
-                        self.thread_log(f"跳过已是GBK的文件: {item}")
-                        skipped_conversions += 1
-                        continue
-                    except UnicodeDecodeError: pass
-                    encodings = ['Shift_JIS', 'cp932', 'latin1']
-                    converted = False
-                    for encoding in encodings:
-                        try:
-                            with open(file_path, 'r', encoding=encoding) as file: content = file.read()
-                            with open(file_path, 'w', encoding='gbk') as file: file.write(content)
-                            self.thread_log(f"成功转换文件: {item} ({encoding} -> GBK)")
-                            converted = True
-                            converted_files += 1
+                        current_decoded = raw_content.decode(encoding, errors='strict') # strict 会在失败时抛出异常
+                        if kana_pattern.search(current_decoded):
+                            decoded_content = current_decoded
+                            encoding_used = encoding
+                            needs_conversion = True
+                            self.thread_log(f"文件 {item} 用 {encoding} 解码后发现假名，标记为需要处理。", "normal")
+                            break # 找到一个含假名的解码就够了
+                        else:
+                            # 解码成功但不含假名，也跳出内部循环
                             break
-                        except Exception: continue
-                    if not converted:
-                        self.thread_log(f"转换文件失败: {item}", "error")
-                        failed_conversions += 1
-            self.thread_log(f"编码转换完成: 转换 {converted_files} 个文件，跳过 {skipped_conversions} 个已是GBK的文件，失败 {failed_conversions} 个文件")
+                    except UnicodeDecodeError:
+                        # 捕获解码错误，继续尝试下一个编码
+                        continue
+
+                # 4. 如果标记为需要转换，则强制写入GBK
+                if needs_conversion and decoded_content is not None and encoding_used is not None:
+                    with open(file_path, 'w', encoding='gbk', errors='replace') as file_out:
+                        file_out.write(decoded_content)
+                    self.thread_log(f"已处理文件: {item} (检测到假名，从 {encoding_used} 强制转换为 GBK)", "success")
+                    corrected_or_converted += 1
+
+            # --- 最终日志总结 (不再包含失败计数) ---
+            skipped_files = processed_files - corrected_or_converted
+            self.thread_log(f"编码检查完成: 处理 {corrected_or_converted} 个文件, 跳过 {skipped_files} 个文件。")
+
+            # --- 新增步骤：检查并按需修改 RPG_RT.ini ---
+            self.thread_log("正在检查并更新 RPG_RT.ini 配置...")
+            ini_path = os.path.join(game_path, "RPG_RT.ini")
+
+            if os.path.exists(ini_path):
+                self.thread_log(f"找到 RPG_RT.ini: {ini_path}")
+
+                lines = []
+                # 假设文件已被转为GBK
+                with open(ini_path, 'r', encoding='gbk') as f:
+                    lines = f.readlines()
+
+                # --- 1. 分析内容，找到段落和键值 ---
+                has_rpg_rt_section = False
+                rpg_rt_section_end_index = -1 # 下一个 section 或文件末尾
+
+                has_full_package_flag = False # 是否在 RPG_RT 段内找到
+
+                has_easyrpg_section = False
+                easyrpg_section_end_index = -1 # 下一个 section 或文件末尾
+
+                has_encoding_936 = False # 是否在 EasyRPG 段内找到
+
+                current_section = None
+                for i, line in enumerate(lines):
+                    line_strip = line.strip()
+
+                    if line_strip.startswith('['):
+                        section_name = line_strip
+                        # 记录上一个 section 的结束位置（即当前行的索引）
+                        if current_section == '[RPG_RT]':
+                            rpg_rt_section_end_index = i
+                        elif current_section == '[EasyRPG]':
+                            easyrpg_section_end_index = i
+
+                        current_section = section_name # 更新当前 section
+
+                        if section_name == '[RPG_RT]':
+                            has_rpg_rt_section = True
+                        elif section_name == '[EasyRPG]':
+                            has_easyrpg_section = True
+                    # 检查键值对是否在对应的段落内
+                    elif current_section == '[RPG_RT]' and line_strip == 'FullPackageFlag=1':
+                        has_full_package_flag = True
+                    elif current_section == '[EasyRPG]' and line_strip == 'Encoding=936':
+                        has_encoding_936 = True
+
+                # 如果文件结束了，设置最后一个 section 的结束索引为文件总行数
+                if current_section == '[RPG_RT]' and rpg_rt_section_end_index == -1:
+                    rpg_rt_section_end_index = len(lines)
+                if current_section == '[EasyRPG]' and easyrpg_section_end_index == -1:
+                    easyrpg_section_end_index = len(lines)
+
+
+                # --- 2. 构建新的文件内容，并在需要时插入 ---
+                output_lines = []
+                needs_write = False
+
+                # 确定 FullPackageFlag 的插入位置 (如果需要)
+                insert_fpf_at = -1
+                if has_rpg_rt_section and not has_full_package_flag:
+                    insert_fpf_at = rpg_rt_section_end_index if rpg_rt_section_end_index != -1 else len(lines)
+                    needs_write = True
+
+                # 确定 Encoding=936 的插入位置 (如果需要)
+                insert_enc_at = -1
+                if has_easyrpg_section and not has_encoding_936:
+                    insert_enc_at = easyrpg_section_end_index if easyrpg_section_end_index != -1 else len(lines)
+                    needs_write = True
+
+                # 遍历原始行，构建输出列表
+                for i, line in enumerate(lines):
+                    # 检查是否到达插入 FullPackageFlag 的点
+                    if i == insert_fpf_at:
+                        output_lines.append("FullPackageFlag=1\n")
+                        self.thread_log("在 [RPG_RT] 段落末尾添加 FullPackageFlag=1")
+
+                    # 检查是否到达插入 Encoding=936 的点
+                    if i == insert_enc_at:
+                        output_lines.append("Encoding=936\n")
+                        self.thread_log("在 [EasyRPG] 段落末尾添加 Encoding=936")
+
+                    # 添加当前原始行到输出列表
+                    output_lines.append(line)
+
+                # 特殊处理：如果插入点正好是文件末尾
+                if len(lines) == insert_fpf_at:
+                    output_lines.append("FullPackageFlag=1\n")
+                    self.thread_log("在文件末尾（因 [RPG_RT] 在最后）添加 FullPackageFlag=1")
+                if len(lines) == insert_enc_at:
+                    output_lines.append("Encoding=936\n")
+                    self.thread_log("在文件末尾（因 [EasyRPG] 在最后）添加 Encoding=936")
+
+
+                # 如果 [EasyRPG] 段落本身就不存在，则需要在末尾添加
+                if not has_easyrpg_section:
+                    # 确保添加前有换行符 (如果文件非空)
+                    if output_lines and not output_lines[-1].endswith('\n'):
+                        output_lines[-1] = output_lines[-1].rstrip() + '\n'
+                    # 添加段落和编码
+                    output_lines.append("[EasyRPG]\n")
+                    output_lines.append("Encoding=936\n")
+                    self.thread_log("添加 [EasyRPG] 段落和 Encoding=936")
+                    needs_write = True
+
+
+                # --- 3. 清理空行并写回文件 ---
+                if needs_write:
+                    # 清理掉完全是空白的行 (只包含空格/制表符/换行符)
+                    final_output_lines = [l for l in output_lines if l.strip()]
+                    # 在[EasyRPG]段落前添加换行
+                    easyRPGline = final_output_lines.index("[EasyRPG]\n")
+                    if easyRPGline > 0:
+                        final_output_lines.insert(easyRPGline, '\n')
+
+                    self.thread_log("正在写回更新后的 RPG_RT.ini...")
+                    # 如果写入失败，流程会中断 (按要求简化错误处理)
+                    with open(ini_path, 'w', encoding='gbk') as f:
+                        f.writelines(final_output_lines)
+                    self.thread_log("RPG_RT.ini 更新完成。")
+                else:
+                    self.thread_log("RPG_RT.ini 无需修改。")
+
+            else:
+                self.thread_log("未找到 RPG_RT.ini 文件，跳过配置修改。")
+            # --- RPG_RT.ini 处理结束 ---
 
             self.thread_update_status("初始化完成")
             self.thread_show_success(f"游戏初始化完成")
@@ -854,6 +1008,7 @@ class RPGTranslationAssistant:
                 return
 
             self.thread_log(f"正在调用Gemini API (模型: {model_name})...")
+            self.thread_log(f"这一步一般会消耗3~5分钟，请耐心等待")
 
             client = genai.Client(api_key=api_key)
 
@@ -937,7 +1092,327 @@ class RPGTranslationAssistant:
     def translate_json_file(self):
         if not self.check_game_path(): return
         self.run_in_thread(self._translate_json)
+    
+    def post_process_translation(self, text, original_text):
+        """
+        对翻译后的文本进行后处理，以适应目标编码或中文习惯。
+        Args:
+            text (str): 待处理的译文文本。
+        Returns:
+            str: 处理后的文本。
+        """
+        if not isinstance(text, str): # 基本类型检查
+            return text
 
+        # 规则 1: 将日语分割号(・)转换为半角分割号(·)
+        processed_text = text.replace('・', '·')
+
+        # 规则 2: 将音符符号(♪)转换为波浪号(~)
+        processed_text = processed_text.replace('♪', '~')
+
+        # 规则 3: 移除多余引号
+        count_source_open = original_text.count('「')
+        count_processed_open = processed_text.count('「')
+        if count_source_open == 0 and count_processed_open > 0:
+            # 如果原文没有开引号，但处理后的文本有，移除处理后的开引号
+            processed_text = processed_text.replace('「', '', count_processed_open)
+
+        # 规则 4: 引号平衡 - 检查整个字符串
+        count_open = processed_text.count('「')
+        count_close = processed_text.count('」')
+
+        if count_open > count_close:
+            # 如果开引号数量大于闭引号，在字符串末尾添加一个闭引号
+            processed_text += '」' * (count_open - count_close) # 添加缺失的数量
+
+        return processed_text
+
+    # --- Helper function for validation ---
+    def validate_translation(self, original, translated):
+        """
+        验证译文是否保留了原文中的特定标记。
+        Args:
+            original (str): 原文文本。
+            translated (str): 译文文本。
+        Returns:
+            bool: True 如果验证通过，False 否则。
+        """
+        try:
+            # 1. 检查反斜杠 + 半角字符 (排除 \\ 和 \n)
+            # Regex: (?<!\\) - negative lookbehind,确保前面不是反斜杠
+            #        \\ - 匹配一个反斜杠
+            #        [ -~] - 匹配任何可打印的ASCII字符(空格到~)
+            pattern_backslash_ascii = r'(?<!\\)\\[ -~]'
+            original_backslash_count = len(re.findall(pattern_backslash_ascii, original))
+            translated_backslash_count = len(re.findall(pattern_backslash_ascii, translated))
+            if original_backslash_count != translated_backslash_count:
+                self.thread_log(f"验证失败: 反斜杠标记数量不匹配。原文({original_backslash_count}): '{original[:50]}...', 译文({translated_backslash_count}): '{translated[:50]}...'", "error")
+                return False
+
+            # 2. 检查上半直角引号「
+            original_quote_count = original.count('「')
+            translated_quote_count = translated.count('「')
+            if original_quote_count > translated_quote_count:
+                self.thread_log(f"验证失败: 上半引号「数量不匹配。原文({original_quote_count}): '{original[:50]}...', 译文({translated_quote_count}): '{translated[:50]}...'", "error")
+                return False
+            
+            # 3. 检查下半直角双引号『
+            original_double_quote_count = original.count('『')
+            translated_double_quote_count = translated.count('『')
+            if original_double_quote_count > translated_double_quote_count:
+                self.thread_log(f"验证失败: 下半引号『数量不匹配。原文({original_double_quote_count}): '{original[:50]}...', 译文({translated_double_quote_count}): '{translated[:50]}...'", "error")
+                return False
+
+            # 如果所有检查都通过
+            return True
+        except Exception as e:
+            self.thread_log(f"验证函数内部出错: {e}", "error")
+            return False # 出错时视为验证失败
+
+    def pre_process_text(self, text):
+        """在发送给 LLM 前替换特殊标记为 PUA 占位符"""
+        if not isinstance(text, str): return text # 添加类型检查
+        processed_text = text.replace('「', '\uE000')
+        processed_text = processed_text.replace('」', '\uE001')
+        processed_text = processed_text.replace('\!', '\uE002')
+        processed_text = processed_text.replace('『', '\uE003')
+        processed_text = processed_text.replace('』', '\uE004')
+        processed_text = processed_text.replace('\.', '\uE005')
+        processed_text = processed_text.replace('\<', '\uE006')
+        processed_text = processed_text.replace('\>', '\uE007')
+        processed_text = processed_text.replace('\|', '\uE008')
+        processed_text = processed_text.replace('\^', '\uE009')
+        return processed_text
+    
+    def restore_pua_placeholders(self, text):
+        """将译文中的 PUA 占位符还原为原始标记"""
+        if not isinstance(text, str): return text # 添加类型检查
+        processed_text = text.replace('\uE000', '「')
+        processed_text = processed_text.replace('\uE001', '」')
+        processed_text = processed_text.replace('\uE002', '\!')
+        processed_text = processed_text.replace('\uE003', '『')
+        processed_text = processed_text.replace('\uE004', '』')
+        processed_text = processed_text.replace('\uE005', '\.')
+        processed_text = processed_text.replace('\uE006', '\<')
+        processed_text = processed_text.replace('\uE007', '\>')
+        processed_text = processed_text.replace('\uE008', '\|')
+        processed_text = processed_text.replace('\uE009', '\^')
+        return processed_text
+
+    # --- Recursive translation helper with retry and split ---
+    def _translate_item_recursive(self, _original_text, context_items, world_dictionary, api_client, config, error_log_path, error_log_lock, max_retries=3):
+        """
+        递归翻译单个文本项，包含验证、重试和拆分逻辑。
+        Args:
+            original_text (str): 需要翻译的原文。
+            context_items (list): 上下文 [(key, val), ...] (此处简化，可能仅用于构建prompt)。
+            world_dictionary (list): 世界观字典。
+            api_client (OpenAI): API客户端实例。
+            config (dict): 翻译配置。
+            error_log_path (str): 错误日志文件路径。
+            error_log_lock (threading.Lock): 文件写入锁。
+            max_retries (int): 最大重试次数。
+        Returns:
+            str: 最终的翻译结果（可能经过后处理）或原文（如果所有尝试失败）。
+        """
+        prompt_template = config.get("prompt_template")
+        model_name = config.get("model")
+        source_language = config.get("source_language", "日语")
+        target_language = config.get("target_language", "简体中文")
+
+        # *** 步骤 1: 预处理原文 ***
+        original_text = self.pre_process_text(_original_text)
+
+        last_failed_translation = None # 记录最后一次失败的译文，用于日志
+
+        for attempt in range(max_retries + 1):
+            try:
+                # a. 构建上下文和术语表 (针对单个条目简化处理)
+                context_texts = [item[0] for item in context_items[-config.get("context_lines", 10):]] # 取最近N条原文
+                context_section = ""
+                if context_texts:
+                    context_section = "### 上文内容\n<context>\n" + "\n".join(context_texts) + "\n</context>\n"
+
+                relevant_dict_entries = []
+                if world_dictionary:
+                    for entry in world_dictionary:
+                        if entry.get('原文') and entry['原文'] in original_text: # 检查单个文本
+                            relevant_dict_entries.append(f"{entry['原文']}|{entry.get('译文', '')}|{entry.get('类别', '')} - {entry.get('描述', '')}")
+
+                glossary_section = ""
+                if relevant_dict_entries:
+                    glossary_section = "### 术语表\n原文|译文|类别 - 描述\n" + "\n".join(relevant_dict_entries) + "\n"
+
+                # b. 构建最终Prompt (注意：这里是为单条文本构建，而不是批次)
+                # 为了复用模板，我们仍然模拟编号，但只包含一条
+                numbered_text = f"1.{original_text}"
+                timestamp_suffix = f"\n[timestamp: {datetime.datetime.now().timestamp()}]" if attempt > 0 else "" # 重试时加时间戳
+
+                final_prompt = prompt_template.format(
+                    source_language=source_language,
+                    target_language=target_language,
+                    glossary_section=glossary_section,
+                    context_section=context_section,
+                    batch_text=numbered_text, # 传入单条编号文本
+                    target_language_placeholder=target_language
+                ) + timestamp_suffix
+
+                # c. 调用API
+                self.thread_log(f"调用API翻译 (尝试 {attempt+1}/{max_retries+1}): '{original_text[:30]}...'")
+                response = api_client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": final_prompt}],
+                    temperature=0.7,
+                    max_tokens=4000
+                )
+                response_content = response.choices[0].message.content
+
+                # d. 提取翻译结果 (处理单条)
+                match = re.search(r'<textarea>(.*?)</textarea>', response_content, re.DOTALL)
+                if match:
+                    translated_block = match.group(1).strip()
+                    # 移除可能的编号前缀 "1."
+                    if translated_block.startswith("1."):
+                        _translated_text = translated_block[2:].strip()
+                    else:
+                        # 如果没有找到"1."，可能API返回格式略有不同，尝试直接使用
+                        self.thread_log(f"警告: API响应未找到预期的'1.'前缀，将直接使用提取内容: '{translated_block[:50]}...'", "error")
+                        _translated_text = translated_block
+
+                    translated_text = self.restore_pua_placeholders(_translated_text) # 还原PUA占位符
+                    last_failed_translation = translated_text # 记录本次尝试结果
+
+                    # e. 验证翻译
+                    if self.validate_translation(_original_text, translated_text):
+                        self.thread_log(f"验证通过 (尝试 {attempt+1}): '{original_text[:30]}...' -> '{translated_text[:30]}...'")
+                        # f. 后处理
+                        final_translation = self.post_process_translation(translated_text, _original_text)
+                        return final_translation # 成功，返回结果
+                    else:
+                        # 验证失败，记录日志（已在validate_translation内完成）
+                        if attempt < max_retries:
+                            self.thread_log(f"验证失败，准备重试 (尝试 {attempt+1}/{max_retries+1}) for '{_original_text[:30]}...'")
+                            continue # 继续下一次重试
+                        else:
+                            self.thread_log(f"验证失败，达到最大重试次数 ({max_retries+1}) for '{_original_text[:30]}...'")
+                            break # 跳出重试循环，进入拆分或回退
+
+                else: # API响应格式错误
+                    self.thread_log(f"API响应格式错误 (尝试 {attempt+1})，未找到<textarea> for '{_original_text[:30]}...'", "error")
+                    self.thread_log(f"原始响应预览: {response_content[:200]}", "error")
+                    last_failed_translation = f"[API响应格式错误: {response_content[:100]}]"
+                    if attempt < max_retries:
+                        continue
+                    else:
+                        break
+
+            except Exception as api_err:
+                self.thread_log(f"API调用失败 (尝试 {attempt+1}): {str(api_err)} for '{_original_text[:30]}...'", "error")
+                last_failed_translation = f"[API调用错误: {str(api_err)}]"
+                if attempt < max_retries:
+                    continue
+                else:
+                    break # API连续失败，跳出重试
+
+        # --- 重试循环结束 ---
+        # 如果执行到这里，说明所有重试都失败了
+
+        # g. 尝试拆分翻译 (如果文本包含多行且不止一行)
+        lines = original_text.split('\n')
+        if len(lines) > 1:
+            self.thread_log(f"翻译和重试均失败，尝试拆分: '{_original_text[:30]}...'")
+            mid_point = (len(lines) + 1) // 2 # 前半部分多一行（如果总行数是奇数）
+            first_half_text = '\n'.join(lines[:mid_point])
+            second_half_text = '\n'.join(lines[mid_point:])
+
+            # 递归调用自身处理两个部分
+            translated_first_half = self._translate_item_recursive(first_half_text, context_items, world_dictionary, api_client, config, error_log_path, error_log_lock, max_retries)
+            translated_second_half = self._translate_item_recursive(second_half_text, context_items, world_dictionary, api_client, config, error_log_path, error_log_lock, max_retries)
+
+            # 拼接结果（即使子部分是原文回退，也要拼接）
+            combined_translation = translated_first_half + '\n' + translated_second_half
+            self.thread_log(f"拆分翻译完成，合并结果 for '{_original_text[:30]}...'")
+            # 注意：拆分后的结果不再进行整体的后处理，因为子部分已经处理过了
+            return combined_translation
+        else:
+            # h. 无法拆分（只有一行）或拆分后仍然失败，执行最终回退
+            self.thread_log(f"翻译、重试、拆分均失败或无法拆分，回退到原文: '{_original_text[:50]}...'", "error")
+            # 记录到错误日志
+            try:
+                with error_log_lock: # 确保线程安全写入
+                    with open(error_log_path, 'a', encoding='utf-8') as elog:
+                        elog.write(f"[{datetime.datetime.now().isoformat()}] 翻译失败，使用原文回退:\n")
+                        elog.write(f"  原文: {_original_text}\n")
+                        if last_failed_translation:
+                            elog.write(f"  最后尝试的译文: {last_failed_translation}\n")
+                        elog.write("-" * 20 + "\n")
+            except Exception as log_err:
+                self.thread_log(f"写入错误日志失败: {log_err}", "error")
+
+            # 返回原文作为最终结果
+            return original_text
+
+    # --- Modified translate_batch_worker ---
+    def translate_batch_worker(self, batch_items, context_items, world_dictionary, api_client, config, translated_data, results_lock, progress_lock, processed_count_shared, error_log_path, error_log_lock):
+        """
+        处理一个批次的翻译任务，调用递归助手函数处理每个条目。
+        """
+        batch_results = {}
+        processed_in_batch = 0
+        total_items = len(batch_items) # 当前批次的总数
+
+        # self.thread_log(f"Worker开始处理批次，包含 {total_items} 个条目")
+
+        for i, (original_key, _) in enumerate(batch_items):
+            try:
+                # 调用递归翻译助手处理单个条目
+                final_translation = self._translate_item_recursive(
+                    original_key,
+                    context_items + batch_items[:i], # 提供之前的上下文（包括当前批次中已处理的）
+                    world_dictionary,
+                    api_client,
+                    config,
+                    error_log_path,
+                    error_log_lock,
+                    max_retries=3 # 默认最大重试次数
+                )
+                batch_results[original_key] = final_translation
+                processed_in_batch += 1
+
+            except Exception as item_err:
+                # 捕获递归函数本身抛出的意外错误（理论上不应发生，因其内部已处理）
+                self.thread_log(f"处理条目时发生意外错误: {item_err} for '{original_key[:50]}...' - 将使用原文回退", "error")
+                batch_results[original_key] = original_key # 极端情况下的回退
+                processed_in_batch += 1 # 即使出错，也算处理了一个
+                # 记录到错误日志
+                try:
+                    with error_log_lock:
+                        with open(error_log_path, 'a', encoding='utf-8') as elog:
+                            elog.write(f"[{datetime.datetime.now().isoformat()}] 处理条目时发生意外错误，使用原文回退:\n")
+                            elog.write(f"  原文: {original_key}\n")
+                            elog.write(f"  错误: {item_err}\n")
+                            elog.write("-" * 20 + "\n")
+                except Exception as log_err:
+                    self.thread_log(f"写入错误日志失败: {log_err}", "error")
+
+
+            # 更新全局结果和进度 (在每个条目处理后更新，提供更平滑的进度)
+            # 使用锁确保线程安全
+            with results_lock:
+                if original_key in batch_results: # 确保结果存在
+                    translated_data[original_key] = batch_results[original_key]
+
+            with progress_lock:
+                processed_count_shared['value'] += 1 # 使用方括号访问 key 'value'
+                current_total_processed = processed_count_shared['value'] # 使用方括号访问 key 'value'
+                # 更新状态 (主线程负责显示，这里只计算)
+                # progress_percent = (current_total_processed / config['total_items_global']) * 100
+                # status_message = f"正在翻译JSON... {current_total_processed}/{config['total_items_global']} ({progress_percent:.1f}%)"
+                # self.thread_update_status(status_message) # 可能过于频繁，考虑移到主线程处理
+
+        # 批次完成后可以记录一下
+        self.thread_log(f"Worker完成批次，处理 {processed_in_batch}/{total_items} 个条目。")
+            
     def _translate_json(self):
         self.thread_update_status("正在翻译JSON文件...")
         game_path = self.game_path.get()
@@ -945,9 +1420,22 @@ class RPGTranslationAssistant:
         work_game_dir = os.path.join(self.works_dir, game_folder_name)
         untranslated_dir = os.path.join(work_game_dir, "untranslated")
         translated_dir = os.path.join(work_game_dir, "translated")
+        os.makedirs(translated_dir, exist_ok=True) # <--- 添加：确保目录存在
         untranslated_json_path = os.path.join(untranslated_dir, "translation.json")
         translated_json_path = os.path.join(translated_dir, "translation_translated.json") # 输出文件名
         dict_csv_path = os.path.join(work_game_dir, "world_dictionary.csv")
+        
+        # --- 添加：定义错误日志路径和锁 ---
+        error_log_path = os.path.join(translated_dir, "error.log")
+        error_log_lock = threading.Lock()
+        # --- 添加：可选：运行时删除旧日志 ---
+        if os.path.exists(error_log_path):
+             try:
+                 os.remove(error_log_path)
+                 self.thread_log(f"已删除旧的错误日志文件: {error_log_path}")
+             except Exception as del_err:
+                 self.thread_log(f"删除旧错误日志失败: {del_err}", "error")
+        # ------------------------------------
 
         # 1. 加载未翻译JSON
         if not os.path.exists(untranslated_json_path):
@@ -958,6 +1446,7 @@ class RPGTranslationAssistant:
             untranslated_data = json.load(f)
         translated_data = untranslated_data.copy() # 创建副本用于存储翻译结果
         original_items = list(untranslated_data.items()) # 转为列表以方便分批
+        total_items = len(original_items) # <--- 添加：获取总数
         self.thread_log(f"成功加载JSON文件，共有 {len(original_items)} 个待翻译条目")
 
         # 2. 加载世界观字典
@@ -975,6 +1464,9 @@ class RPGTranslationAssistant:
             self.thread_log("未找到世界观字典文件，将不使用字典进行翻译")
 
         # 3. 获取翻译配置
+        config = self.translate_config.copy() # <--- 修改：复制配置以便修改
+        config['total_items_global'] = total_items # <--- 添加：将总数存入配置传递
+
         api_url = self.translate_config.get("api_url")
         api_key = self.translate_config.get("api_key").strip()
         model_name = self.translate_config.get("model").strip()
@@ -1009,223 +1501,113 @@ class RPGTranslationAssistant:
             return
 
         # 5. 分批和并发处理
-        total_items = len(original_items)
-        processed_count = 0
-        error_count = 0
-        results_lock = threading.Lock()
+        translated_data = untranslated_data.copy() # 用于存储最终结果
+        results_lock = threading.Lock() # 锁translated_data
+        progress_lock = threading.Lock() # 锁共享计数器
+        processed_count_tracker = {'value': 0} # 使用字典模拟可变对象
+
         self.thread_log(f"开始翻译处理，总条目数: {total_items}")
-
-        def translate_batch_worker(batch_items, context_items):
-            nonlocal processed_count, error_count
-            try:
-                # a. 提取当前批次的原文
-                batch_texts_dict = {str(i+1): item[0] for i, item in enumerate(batch_items)} # 从1开始编号
-                batch_text_numbered = "\n".join([f"{i+1}.{item[0]}" for i, item in enumerate(batch_items)])
-                self.thread_log(f"处理新批次，包含 {len(batch_items)} 个条目")
-                self.thread_log(f"批次原文示例: {list(batch_texts_dict.values())[:2]}")
-
-                # b. 提取上下文原文
-                context_texts = [item[0] for item in context_items]
-                context_section = ""
-                if context_texts:
-                    context_section = "### 上文内容\n<context>\n" + "\n".join(context_texts) + "\n</context>\n"
-                    self.thread_log(f"已添加 {len(context_texts)} 行上下文")
-
-                # c. 筛选相关字典条目
-                relevant_dict_entries = []
-                current_batch_full_text = " ".join(batch_texts_dict.values()) # 合并批次文本用于检查
-                if world_dictionary:
-                    for entry in world_dictionary:
-                        if entry.get('原文') and entry['原文'] in current_batch_full_text:
-                            relevant_dict_entries.append(f"{entry['原文']}|{entry.get('译文', '')}|{entry.get('类别', '')} - {entry.get('描述', '')}")
-                    self.thread_log(f"从字典中找到 {len(relevant_dict_entries)} 个相关条目")
-
-                glossary_section = ""
-                if relevant_dict_entries:
-                    glossary_section = "### 术语表\n原文|译文|类别 - 描述\n" + "\n".join(relevant_dict_entries) + "\n"
-
-                # d. 构建最终Prompt
-                final_prompt = prompt_template.format(
-                    source_language=source_language,
-                    target_language=target_language,
-                    glossary_section=glossary_section,
-                    context_section=context_section,
-                    batch_text=batch_text_numbered,
-                    target_language_placeholder=target_language # For the final textarea example
-                )
-
-                # e. 调用API
-                self.thread_log("正在调用翻译API...")
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[{"role": "user", "content": final_prompt}],
-                    temperature=0.7, # 可以考虑加入配置
-                    max_tokens=4000 # 可以考虑加入配置
-                )
-                response_content = response.choices[0].message.content
-                self.thread_log("API调用成功，正在解析响应...")
-                
-                # 输出API响应的前500个字符，以便调试
-                self.thread_log(f"API响应内容预览: {response_content[:500]}...")
-
-                # f. 提取翻译结果 (修正版，处理多行)
-                match = re.search(r'<textarea>(.*?)</textarea>', response_content, re.DOTALL)
-                if match:
-                    translated_block = match.group(1).strip()
-                    translated_lines = translated_block.split('\n')
-                    self.thread_log(f"提取到的翻译文本行数: {len(translated_lines)}")
-                    self.thread_log(f"翻译文本预览: {translated_lines[:3]}")
-
-                    batch_results = {}
-                    current_item_lines = [] # 用于收集当前项的所有行
-                    current_original_key = None
-                    expected_item_index = 0 # 期望处理的 batch_items 中的索引 (0-based)
-
-                    line_iterator = iter(translated_lines) # 使用迭代器方便处理
-                    current_line = None
-
-                    while expected_item_index < len(batch_items):
-                        expected_num = expected_item_index + 1
-                        prefix = f"{expected_num}."
-                        original_key = batch_items[expected_item_index][0] # 获取当前期望项的原文key
-
-                        # 找到当前期望项的第一行
-                        found_start_line = False
-                        try:
-                            while True: # 循环直到找到期望的行或耗尽行
-                                current_line = next(line_iterator) if current_line is None else current_line
-                                if current_line.startswith(prefix):
-                                    current_item_lines = [current_line[len(prefix):]] # 添加第一行（去除前缀）
-                                    current_line = None # 消耗掉当前行
-                                    found_start_line = True
-                                    break
-                                else:
-                                     # 如果当前行不是期望的开头，记录警告并尝试下一行
-                                     self.thread_log(f"警告: 跳过非预期行: '{current_line[:50]}...'，仍在寻找 '{prefix}'", "error")
-                                     current_line = None # 消耗掉当前行
-                        except StopIteration:
-                             # 如果没找到期望的起始行就结束了
-                             self.thread_log(f"警告: 未找到前缀为 '{prefix}' 的翻译起始行。", "error")
-                             if not found_start_line: # 确保至少找到过起始行才继续
-                                break # 提前退出主while循环
-
-                        # 如果找到了起始行，继续收集后续行，直到遇到下一个数字前缀或结束
-                        if found_start_line:
-                            try:
-                                while True:
-                                    next_peek_line = next(line_iterator)
-                                    # 检查下一行是否是 *任何* 数字前缀开头
-                                    if re.match(r"^\d+\.", next_peek_line):
-                                        current_line = next_peek_line # 下一行是新项的开始，将其存回，留给下次迭代
-                                        break # 停止收集当前项
-                                    else:
-                                        current_item_lines.append(next_peek_line) # 属于当前项，收集起来
-                                        current_line = None # 消耗掉行
-                            except StopIteration:
-                                current_line = None # 已经到了末尾
-
-                            # 收集完毕，组合结果
-                            full_translation = "\n".join(current_item_lines)
-
-                            # --- 可以在这里进行更严格的检查 ---
-                            # 检查特殊标记是否保留 (示例)
-                            required_patterns = re.findall(r"(\\[><^V]\[?\d*\]?)", original_key) # 查找原文中的特殊标记
-                            missing_patterns = []
-                            for pattern in required_patterns:
-                                # 对 \V[n] 这类进行特殊处理，因为n可能变化，只检查 \V[
-                                if pattern.startswith("\\V["):
-                                    if "\\V[" not in full_translation:
-                                         # 稍微宽松的检查：如果原文有\V[数字]，译文至少要有\V[
-                                        if not re.search(r"\\V\[\d+\]", full_translation):
-                                            missing_patterns.append("\\V[...]")
-                                elif pattern not in full_translation:
-                                    missing_patterns.append(pattern)
-
-                            if missing_patterns:
-                                self.thread_log(f"警告: 翻译 '{prefix}' 可能丢失了原文标记: {missing_patterns}. 原文: '{original_key[:50]}...', 译文: '{full_translation[:50]}...'", "error")
-                            # --- 检查结束 ---
-
-                            batch_results[original_key] = full_translation
-                            expected_item_index += 1 # 准备处理下一个期望项
-                        else:
-                             # 没找到起始行，记录错误并跳过该项
-                             self.thread_log(f"错误: 无法为原文 '{original_key[:50]}...' 找到对应的翻译行 (前缀 '{prefix}')。", "error")
-                             batch_results[original_key] = original_key # 使用原文作为回退
-                             expected_item_index += 1
-
-                    # 检查是否所有项都被处理了
-                    if expected_item_index != len(batch_items):
-                         self.thread_log(f"警告: 批次翻译解析不完整！预期 {len(batch_items)} 项，实际处理 {expected_item_index} 项。", "error")
-                         # 填充未处理的项
-                         for i in range(expected_item_index, len(batch_items)):
-                             key = batch_items[i][0]
-                             if key not in batch_results:
-                                 batch_results[key] = key # Fallback
-                                 self.thread_log(f"警告: 第 {i+1} 项 '{key[:50]}...' 未能解析，使用原文填充。", "error")
-
-                    self.thread_log(f"成功解析 {len(batch_results)} 个翻译结果")
-
-                    # 输出一些翻译结果示例
-                    sample_results = list(batch_results.items())[:3]
-                    self.thread_log("翻译结果示例:")
-                    for orig, trans in sample_results:
-                        self.thread_log(f"原文: {orig}")
-                        self.thread_log(f"译文: {trans}")
-
-                else:
-                    # API响应格式错误的处理保持不变
-                    self.thread_log(f"警告: API响应格式错误，未找到<textarea>。批次原文: {list(batch_texts_dict.values())[:2]}...", "error")
-                    self.thread_log(f"原始响应: {response_content[:500]}...", "error")
-                    batch_results = {item[0]: item[0] for item in batch_items}
-                    error_count += len(batch_items)
-
-                # g. 更新全局结果 (加锁)
-                with results_lock:
-                    for original, translated in batch_results.items():
-                        translated_data[original] = translated
-                    processed_count += len(batch_items)
-                    # 更新状态栏进度
-                    progress_percent = (processed_count / total_items) * 100
-                    self.thread_update_status(f"正在翻译JSON... {processed_count}/{total_items} ({progress_percent:.1f}%)")
-                    self.thread_log(f"进度更新: {processed_count}/{total_items} ({progress_percent:.1f}%)")
-
-            except Exception as batch_err:
-                with results_lock:
-                    error_count += len(batch_items)
-                self.thread_log(f"处理批次时出错: {str(batch_err)}", "error")
-                # 记录失败的批次原文（部分）
-                failed_keys = [item[0] for item in batch_items]
-                self.thread_log(f"失败的批次原文(部分): {failed_keys[:3]}...", "error")
 
         # 6. 使用线程池执行
         self.thread_log(f"开始使用 {concurrency} 个线程进行翻译...")
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = []
+            # --- 添加：传递共享计数器和总数 ---
+            processed_count_shared = {'value': 0} # 为每个执行创建一个新的计数器状态
+
             for i in range(0, total_items, batch_size):
                 batch = original_items[i : i + batch_size]
-                # 获取上下文（前N行原文的key）
                 context_start = max(0, i - context_lines)
                 context = original_items[context_start : i]
-                futures.append(executor.submit(translate_batch_worker, batch, context))
-                self.thread_log(f"已提交第 {i//batch_size + 1} 批翻译任务")
 
-            # 等待所有任务完成
-            self.thread_log("等待所有翻译任务完成...")
-            for future in concurrent.futures.as_completed(futures):
-                # 这里可以添加对 future.exception() 的检查，但在worker内部已经处理了
-                pass
-            self.thread_log("所有翻译任务已完成")
+                # --- 修改：传递额外参数 ---
+                futures.append(executor.submit(
+                    self.translate_batch_worker,
+                    batch,
+                    context,
+                    world_dictionary, # 确保已加载
+                    client,           # 确保已初始化
+                    config,           # 包含总数的配置副本
+                    translated_data,
+                    results_lock,
+                    progress_lock,
+                    processed_count_shared, # 传递共享计数器状态字典
+                    error_log_path,
+                    error_log_lock
+                ))
+                # self.thread_log(f"已提交第 {i//batch_size + 1} 批翻译任务") # 这个日志可能过多，注释掉
+
+            # --- 修改：添加进度更新循环 ---
+            completed_futures = 0
+            total_futures = len(futures)
+            last_logged_percent = -1
+            while completed_futures < total_futures:
+                # 检查已完成的任务 (可以设置超时)
+                done, not_done = concurrent.futures.wait(futures, timeout=1.0, return_when=concurrent.futures.FIRST_COMPLETED)
+                completed_futures += len(done)
+
+                # 更新进度
+                # processed_now = processed_count_shared.value # 使用 Value
+                processed_now = processed_count_shared['value'] # 使用字典计数器
+                progress_percent = (processed_now / total_items) * 100 if total_items > 0 else 0
+                # 避免过于频繁地更新状态栏，可以每隔5%或10%更新一次
+                if int(progress_percent // 5) > last_logged_percent: # 每5%更新一次
+                    status_message = f"正在翻译JSON... {processed_now}/{total_items} ({progress_percent:.1f}%)"
+                    self.thread_update_status(status_message)
+                    self.thread_log(status_message) # 同时记录日志
+                    last_logged_percent = int(progress_percent // 5)
+
+                # (可选) 检查异常
+                for future in done:
+                    try:
+                        future.result() # 获取结果或抛出异常
+                    except Exception as future_err:
+                        # 这里的错误通常是 worker 内部未捕获的意外错误
+                        self.thread_log(f"线程池任务异常: {future_err}", "error")
+
+                # 更新 future 列表，移除已完成的
+                futures = list(not_done)
+                if not futures: # 如果所有任务都完成了，退出循环
+                    break
+
+            # 确保最终进度显示100%
+            self.thread_update_status(f"正在翻译JSON... {total_items}/{total_items} (100.0%)")
+            self.thread_log("所有翻译任务已完成（或出错）")
+            # ----------------------------
 
         # 7. 保存翻译后的JSON
         self.thread_log("所有翻译任务完成，正在保存结果...")
+
+        # --- 添加：检查错误日志 ---
+        error_count_in_log = 0
+        if os.path.exists(error_log_path):
+            try:
+                with open(error_log_path, 'r', encoding='utf-8') as elog_read:
+                    # 简单地计算分隔符数量来估计错误条目数
+                    log_content = elog_read.read()
+                    error_count_in_log = log_content.count("-" * 20)
+                if error_count_in_log > 0:
+                     # 使用 error 级别日志，更醒目
+                    self.thread_log(f"警告: 检测到 {error_count_in_log} 个翻译条目无法自动修正并回退到原文。", "error")
+                    self.thread_log(f"详情请查看错误日志: {error_log_path}", "error")
+                    # 可以考虑在主界面的状态栏也提示，但日志已经很明显了
+                    # self.thread_show_error(f"警告: {error_count_in_log} 个翻译使用了原文回退，请检查日志: {error_log_path}")
+
+            except Exception as read_log_err:
+                self.thread_log(f"读取错误日志时出错: {read_log_err}", "error")
+        # --------------------------
+
         try:
             with open(translated_json_path, 'w', encoding='utf-8') as f:
                 json.dump(translated_data, f, ensure_ascii=False, indent=4)
+
             self.thread_update_status("JSON文件翻译完成")
-            if error_count == 0:
+            if error_count_in_log == 0:
                 self.thread_show_success(f"JSON文件翻译完成，结果已保存: {translated_json_path}")
             else:
-                self.thread_show_success(f"JSON文件翻译完成，但有 {error_count} 个条目可能翻译失败（已使用原文填充），结果已保存: {translated_json_path}")
+                # 结果依然是成功保存，但带有警告
+                self.thread_show_success(f"JSON文件翻译完成（有 {error_count_in_log} 个条目使用原文回退），结果已保存: {translated_json_path}")
+
         except Exception as save_err:
             self.thread_show_error(f"保存翻译后的JSON文件失败: {str(save_err)}")
 
