@@ -121,6 +121,9 @@ class RPGTranslationAssistant:
 - 你在原文中可能会看到特殊字符，如 , , 。
 - 这些是重要的占位符，**必须**在译文中原样保留，**禁止**修改、删除或翻译它们。
 
+### 不保留源语言专有字符原则
+- 在翻译过程中，**禁止**保留源语言专有字符，如源语言为日语时，禁止在译文中出现平假名或片假名。
+
 ### 这是你接下来的翻译任务，原文文本如下
 <textarea>
 {batch_text}
@@ -1104,8 +1107,9 @@ class RPGTranslationAssistant:
         if not isinstance(text, str): # 基本类型检查
             return text
 
-        # 规则 1: 将日语分割号(・)转换为半角分割号(·)
+        # 规则 1: 将日语分割号(・)转换为半角分割号(·)，日语破折号(ー)转换为中文破折号(—)
         processed_text = text.replace('・', '·')
+        processed_text = processed_text.replace('ー', '—')
 
         # 规则 2: 将音符符号(♪)转换为波浪号(~)
         processed_text = processed_text.replace('♪', '~')
@@ -1138,6 +1142,20 @@ class RPGTranslationAssistant:
             bool: True 如果验证通过，False 否则。
         """
         try:
+            # --- 新增：规则 1: 检查译文中是否残留日语假名 ---
+            # \u3040-\u309F: Hiragana, \u30A0-\u30FF: Katakana
+            kana_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF]')
+            # 特别的，这里要检查格式化后的译文，排除此时还未清理的日语标点。
+            if kana_pattern.search(self.post_process_translation(translated, original)):
+                self.thread_log(f"验证失败: 译文残留日语假名。原文: '{original[:50]}...', 译文: '{translated[:50]}...'", "error")
+                return False
+            
+            # --- 新增：规则 2: 如果译文以\\开头，检查是否有对应的\\ ---
+            if translated.startswith('\\\\'):
+                if not translated.startswith('\\\\'):
+                    self.thread_log(f"验证失败: 译文丢失了开头格式符。原文: '{original[:50]}...', 译文: '{translated[:50]}...'", "error")
+                    return False
+
             # 1. 检查反斜杠 + 半角字符 (排除 \\ 和 \n)
             # Regex: (?<!\\) - negative lookbehind,确保前面不是反斜杠
             #        \\ - 匹配一个反斜杠
@@ -1156,11 +1174,11 @@ class RPGTranslationAssistant:
                 self.thread_log(f"验证失败: 上半引号「数量不匹配。原文({original_quote_count}): '{original[:50]}...', 译文({translated_quote_count}): '{translated[:50]}...'", "error")
                 return False
             
-            # 3. 检查下半直角双引号『
+            # 3. 检查上半直角双引号『
             original_double_quote_count = original.count('『')
             translated_double_quote_count = translated.count('『')
             if original_double_quote_count > translated_double_quote_count:
-                self.thread_log(f"验证失败: 下半引号『数量不匹配。原文({original_double_quote_count}): '{original[:50]}...', 译文({translated_double_quote_count}): '{translated[:50]}...'", "error")
+                self.thread_log(f"验证失败: 上半双引号『数量不匹配。原文({original_double_quote_count}): '{original[:50]}...', 译文({translated_double_quote_count}): '{translated[:50]}...'", "error")
                 return False
 
             # 如果所有检查都通过
@@ -1179,7 +1197,7 @@ class RPGTranslationAssistant:
         processed_text = processed_text.replace('』', '\uE004')
         processed_text = processed_text.replace('\.', '\uE005')
         processed_text = processed_text.replace('\<', '\uE006')
-        processed_text = processed_text.replace('\>', '\uE007')
+        processed_text = re.sub(r'(?<!\\)\>', '\uE007', processed_text) # 注意：这里使用了负向前瞻来避免替换已转义的字符
         processed_text = processed_text.replace('\|', '\uE008')
         processed_text = processed_text.replace('\^', '\uE009')
         return processed_text
@@ -1273,7 +1291,7 @@ class RPGTranslationAssistant:
                     translated_block = match.group(1).strip()
                     # 移除可能的编号前缀 "1."
                     if translated_block.startswith("1."):
-                        _translated_text = translated_block[2:].strip()
+                        _translated_text = translated_block[2:]
                     else:
                         # 如果没有找到"1."，可能API返回格式略有不同，尝试直接使用
                         self.thread_log(f"警告: API响应未找到预期的'1.'前缀，将直接使用提取内容: '{translated_block[:50]}...'", "error")
@@ -1551,7 +1569,7 @@ class RPGTranslationAssistant:
                 processed_now = processed_count_shared['value'] # 使用字典计数器
                 progress_percent = (processed_now / total_items) * 100 if total_items > 0 else 0
                 # 避免过于频繁地更新状态栏，可以每隔5%或10%更新一次
-                if int(progress_percent // 5) > last_logged_percent: # 每5%更新一次
+                if int(progress_percent // 1) > last_logged_percent: # 每1%更新一次
                     status_message = f"正在翻译JSON... {processed_now}/{total_items} ({progress_percent:.1f}%)"
                     self.thread_update_status(status_message)
                     self.thread_log(status_message) # 同时记录日志
