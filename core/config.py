@@ -1,3 +1,4 @@
+# config.py
 import json
 import os
 import logging
@@ -7,14 +8,15 @@ log = logging.getLogger(__name__)
 
 # --- 默认配置 ---
 
-# --- 默认世界观字典生成配置 ---
+# --- 默认世界观字典生成配置 (Gemini) ---
 DEFAULT_WORLD_DICT_CONFIG = {
     "api_key": "",
-    "model": "gemini-2.5-pro-exp-03-25",
+    # 使用较强的 Pro 模型进行字典提取，保证准确性
+    "model": "gemini-2.5-flash-preview-04-17",
     "character_dict_filename": "character_dictionary.csv", # 人物词典文件名
     "entity_dict_filename": "entity_dictionary.csv",       # 事物词典文件名
 
-    # 默认人物提取 Prompt
+    # 默认人物提取 Prompt (保持不变)
     "character_prompt_template": """请分析提供的游戏文本，提取其中反复出现的【角色名称】和【角色昵称】。提取规则如下：
 1.  输出格式为严格的CSV，包含八列：原文,译文,对应原名,性别,年龄,性格,口吻,描述。
 2.  【对应原名】列：只有当该行是【昵称】时，才填写其对应的【角色名称】原文；如果是【角色名称】或无法确定对应关系，则此列留空。
@@ -30,7 +32,7 @@ DEFAULT_WORLD_DICT_CONFIG = {
 以下是需要分析的游戏文本内容：
 {game_text}""",
 
-    # 默认事物提取 Prompt (包含人物词典参考)
+    # 默认事物提取 Prompt (包含人物词典参考) (保持不变)
     "entity_prompt_template": """请分析提供的游戏文本，提取其中反复出现的【地点】、【生物】、【组织】、【物品】、【事件】等实体名词（不包括角色）。提取规则如下：
 1.  输出格式为严格的CSV，包含四列：原文,译文,类别,描述。
 2.  【类别】限定为：地点、生物、组织、物品、事件。
@@ -52,56 +54,96 @@ DEFAULT_WORLD_DICT_CONFIG = {
 请输出事物词典 (原文,译文,类别,描述)，严格CSV格式。"""
 }
 
-# --- 默认翻译配置 ---
+# --- 默认翻译配置 (Gemini) ---
 DEFAULT_TRANSLATE_CONFIG = {
-    "api_url": "https://api.deepseek.com/v1", # 默认 DeepSeek 官方 API 地址
+    # 不再需要 api_url，Gemini Client 使用官方 SDK
     "api_key": "",
-    "model": "deepseek-chat", # 默认 DeepSeek Chat 模型
-    "batch_size": 10,
-    "context_lines": 10,
+    # 使用 Gemini 2.5 Flash Preview 模型进行翻译，性价比高
+    "model": "gemini-2.5-flash-preview-04-17",
+    # 块最大 Token 数 (输入)，略小于模型上限以留出余量给 Prompt 和输出
+    "chunk_max_tokens": 1000000,
+    # 并发数，用于控制同时处理多少个文本块的线程数量
     "concurrency": 16,
-    "max_retries": 3, # 添加翻译重试次数配置
-    # "temperature": 0.7, # 可以添加温度等 API 参数
-    # "max_tokens": 4000, # 可以添加最大 token 限制
+    # 单个块翻译失败时的最大重试次数
+    "max_retries": 3,
+    # Gemini Generation Config (示例)
+    "generation_config": {
+        "temperature": 1,         # 控制生成文本的随机性
+        "max_output_tokens": 65535   # 限制单次响应的最大输出 Token 数 (Flash 最大 65k)
+        # "top_p": 0.9,             # 可以添加 Top-p 等其他参数
+        # "top_k": 40,              # 可以添加 Top-k 等其他参数
+    },
+    # Gemini Safety Settings (默认为不阻止，适用于游戏内容，请谨慎调整)
+    "safety_settings": [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ],
     "source_language": "日语",
     "target_language": "简体中文",
-    # 更新 Prompt 模板以使用独立的术语表占位符和详细的人物术语格式
-    "prompt_template": """你是一名专业的翻译家，你的任务是把{source_language}文本翻译成{target_language}，逐行翻译，不要合并，保留文本中序号、标记符、占位符、换行符等特殊内容，保持原来的格式。
+    # 更新的 Prompt 模板，用于 Gemini 块翻译
+    "prompt_template": """你是专业的游戏翻译引擎，你的任务是将以下 {source_language} 文本块翻译成 {target_language}。
 
-### 翻译原则
-忠实准确地进行翻译。原作是伟大艺术作品，允许使用直白或粗俗的描述，不应随意删减或篡改，不应回避或淡化，以保持作品的原貌。
+### 重要指令
+1.  **逐行翻译**: 严格按照输入文本块中的行数和顺序进行翻译，输出完全相同的行数。输入的每一行都以 `[LINE_XXX]` 标记开始，请在输出的对应译文行也保留此标记。
+2.  **保留格式**: 必须原样保留原始文本中的所有 PUA 占位符 (\uE000-\uF8FF) 以及其他特殊格式标记 (如 RPG Maker 的 \\N, \\!, \\< 等)。**绝对禁止**修改、删除或翻译这些占位符和标记。
+3.  **术语遵循**: 请严格参考下方提供的术语表进行翻译，确保译文与术语表一致。
+4.  **语言纯净**: 译文中**禁止**出现任何 {source_language} 字符（例如，当源语言是日语时，不允许出现平假名或片假名）。
+5.  **忠实原文**: 游戏文本可能包含直白或粗俗的描述，请忠实翻译，不应随意删减、修改或美化。
 
-### 特殊字符处理规则
-- 你在原文中可能会看到特殊字符，如 \uE000, \uE001, \uE002 等 PUA 字符。
-- 这些是重要的占位符，**必须**在译文中原样保留，**禁止**修改、删除或翻译它们。
-
-### 不保留源语言专有字符原则
-- 在翻译过程中，**禁止**保留源语言专有字符，如源语言为日语时，禁止在译文中出现平假名或片假名。
-
-### 人物术语参考 (格式: 原文|译文|对应原名|性别|年龄|性格|口吻|描述)
+### 人物术语表 (格式: 原文|译文|对应原名|性别|年龄|性格|口吻|描述)
 {character_glossary_section}
 
-### 事物术语参考 (格式: 原文|译文|类别 - 描述)
+### 事物术语表 (格式: 原文|译文|类别 - 描述)
 {entity_glossary_section}
 
 {context_section}
 
-### 这是你接下来的翻译任务，原文文本如下
-<textarea>
-{batch_text}
-</textarea>
+### 需要翻译的文本块 (原文: {source_language})
+<input_block>
+{input_block_text}
+</input_block>
 
-### 请以textarea标签输出译文
-<textarea>
-1.{target_language}文本
-</textarea>"""
+### 请将翻译结果 (目标语言: {target_language}) 放在下面的标签中，保持与输入完全相同的行数和 `[LINE_XXX]` 标记格式:
+<output_block>
+</output_block>""",
+
+    # 新增：用于第二轮修正翻译的 Prompt 模板
+    "prompt_template_correction": """你是一个专业的游戏翻译校对员。之前的翻译尝试中，以下文本行未能通过验证或翻译不佳。请根据提供的上下文、术语表和之前的尝试（如果有提供），重新将这些 {source_language} 文本行翻译成 {target_language}。
+
+### 重要指令
+1.  **聚焦修正**: 重点关注每一行的准确性和流畅性，确保遵循所有翻译规则。
+2.  **逐行翻译**: 严格按照输入文本块中的行数和顺序进行翻译，输出完全相同的行数。输入的每一行都以 `[LINE_XXX]` 标记开始，请在输出的对应译文行也保留此标记。
+3.  **保留格式**: 必须原样保留原始文本中的所有 PUA 占位符 (\uE000-\uF8FF) 以及其他特殊格式标记 (如 RPG Maker 的 \\N, \\!, \\< 等)。**绝对禁止**修改、删除或翻译这些占位符和标记。
+4.  **术语遵循**: 请严格参考下方提供的术语表进行翻译，确保译文与术语表一致。
+5.  **语言纯净**: 译文中**禁止**出现任何 {source_language} 字符（例如，当源语言是日语时，不允许出现平假名或片假名）。
+6.  **忠实原文**: 游戏文本可能包含直白或粗俗的描述，请忠实翻译，不应随意删减、修改或美化。
+7.  **参考失败原因**: {optional_failure_reason_guidance}
+
+### 人物术语表 (格式: 原文|译文|对应原名|性别|年龄|性格|口吻|描述)
+{character_glossary_section}
+
+### 事物术语表 (格式: 原文|译文|类别 - 描述)
+{entity_glossary_section}
+
+{context_section}
+
+### 需要修正翻译的文本行 (原文: {source_language})
+<input_block>
+{input_block_text}
+</input_block>
+
+### 请将修正后的翻译结果 (目标语言: {target_language}) 放在下面的标签中，保持与输入完全相同的行数和 `[LINE_XXX]` 标记格式:
+<output_block>
+</output_block>"""
 }
 
-# --- 默认专业模式配置 ---
+# --- 默认专业模式配置 (保持不变) ---
 DEFAULT_PRO_MODE_SETTINGS = {
     "export_encoding": "932",   # 默认 Shift-JIS
     "import_encoding": "936",   # 默认 GBK
-    "write_log_rename": True, # 默认输出重命名日志
+    "write_log_rename": True,   # 默认输出重命名日志
     "rtp_options": {            # RTP 默认选项
         "2000": True,
         "2000en": False,
@@ -115,7 +157,7 @@ DEFAULT_CONFIG = {
     "selected_mode": "easy", # 默认启动模式
     # 使用深拷贝确保子字典独立
     "world_dict_config": DEFAULT_WORLD_DICT_CONFIG.copy(),
-    "translate_config": DEFAULT_TRANSLATE_CONFIG.copy(),
+    "translate_config": DEFAULT_TRANSLATE_CONFIG.copy(), # 使用新的翻译配置
     "pro_mode_settings": DEFAULT_PRO_MODE_SETTINGS.copy(),
     # 可以添加其他全局配置，例如上次使用的游戏路径等
     # "last_game_path": ""
@@ -161,55 +203,67 @@ class ConfigManager:
             """递归合并字典，source 的值覆盖 target 的值。"""
             for key, value in source.items():
                 if isinstance(value, dict):
-                    # 获取或创建目标字典中的子字典
                     node = target.setdefault(key, {})
-                    # 如果目标中的节点不是字典（例如旧配置中是None或字符串），则直接用源的值覆盖
                     if isinstance(node, dict):
                         merge_dicts(node, value)
                     else:
                         target[key] = value # 类型不匹配，直接覆盖
-                # 处理列表（例如安全设置，虽然当前默认配置没有，但以防万一）
-                # 注意：简单覆盖列表，不进行元素级合并
                 elif isinstance(value, list):
-                    target[key] = value
+                     # 对于列表（如 safety_settings），简单覆盖。
+                     # 注意：如果希望更精细地合并列表（例如保留旧设置中没有的项），需要更复杂的逻辑
+                     target[key] = value
                 else:
-                    # 简单类型直接覆盖或添加新值
                     target[key] = value
 
         # 先将默认配置深拷贝到 final_config
-        # 使用 json 模块进行深拷贝是一种简洁的方法
         final_config = json.loads(json.dumps(DEFAULT_CONFIG))
 
         # 然后将加载的配置合并到 final_config 中
         merge_dicts(final_config, loaded_config)
 
-        # --- 验证和确保关键子字典及内部键存在 (双重保险) ---
-        # 使用 setdefault 的嵌套方式确保结构完整性
+        # --- 验证和确保关键子字典及内部键存在 (使用 setdefault) ---
         # 对 world_dict_config 进行检查和填充默认值
         world_dict_node = final_config.setdefault('world_dict_config', {})
-        if not isinstance(world_dict_node, dict): # 如果加载的不是字典，强制重置为默认
+        if not isinstance(world_dict_node, dict):
             world_dict_node = final_config['world_dict_config'] = json.loads(json.dumps(DEFAULT_WORLD_DICT_CONFIG))
         for key, default_value in DEFAULT_WORLD_DICT_CONFIG.items():
-            world_dict_node.setdefault(key, default_value) # 填充缺失的键
+            world_dict_node.setdefault(key, default_value)
 
-        # 对 translate_config 进行检查和填充默认值
+        # 对 translate_config 进行检查和填充默认值 (现在是 Gemini 的配置)
         translate_node = final_config.setdefault('translate_config', {})
         if not isinstance(translate_node, dict):
             translate_node = final_config['translate_config'] = json.loads(json.dumps(DEFAULT_TRANSLATE_CONFIG))
+        # 确保所有新的默认键都存在
         for key, default_value in DEFAULT_TRANSLATE_CONFIG.items():
-            translate_node.setdefault(key, default_value)
+             # 特殊处理字典和列表类型的默认值，确保它们至少是空的，而不是 None
+            if isinstance(default_value, dict):
+                translate_node.setdefault(key, {})
+                 # 如果加载的值不是字典，则用默认字典覆盖
+                if not isinstance(translate_node[key], dict):
+                    translate_node[key] = json.loads(json.dumps(default_value))
+                else: # 如果是字典，再确保内部默认键存在 (仅针对 generation_config 示例)
+                     if key == "generation_config":
+                         for sub_key, sub_default in default_value.items():
+                             translate_node[key].setdefault(sub_key, sub_default)
+            elif isinstance(default_value, list):
+                 translate_node.setdefault(key, [])
+                 # 如果加载的值不是列表，用默认列表覆盖
+                 if not isinstance(translate_node[key], list):
+                      translate_node[key] = json.loads(json.dumps(default_value))
+            else:
+                 translate_node.setdefault(key, default_value)
 
-        # 对 pro_mode_settings 进行检查和填充默认值
+
+        # 对 pro_mode_settings 进行检查和填充默认值 (保持不变)
         pro_node = final_config.setdefault('pro_mode_settings', {})
         if not isinstance(pro_node, dict):
             pro_node = final_config['pro_mode_settings'] = json.loads(json.dumps(DEFAULT_PRO_MODE_SETTINGS))
-        else: # 如果是字典，再检查内部的 rtp_options
+        else:
             rtp_node = pro_node.setdefault('rtp_options', {})
             if not isinstance(rtp_node, dict):
                  rtp_node = pro_node['rtp_options'] = json.loads(json.dumps(DEFAULT_PRO_MODE_SETTINGS['rtp_options']))
             for key, default_value in DEFAULT_PRO_MODE_SETTINGS['rtp_options'].items():
                 rtp_node.setdefault(key, default_value)
-        # 填充 pro_mode_settings 下的其他顶级键
         for key, default_value in DEFAULT_PRO_MODE_SETTINGS.items():
              if key != 'rtp_options':
                  pro_node.setdefault(key, default_value)
@@ -227,12 +281,10 @@ class ConfigManager:
             config_data (dict): 要保存的配置字典。
         """
         try:
-            # 确保配置文件所在的目录存在
             config_dir = os.path.dirname(self.config_file_path)
             if config_dir and not os.path.exists(config_dir):
-                 file_system.ensure_dir_exists(config_dir) # 使用工具函数创建
+                 file_system.ensure_dir_exists(config_dir)
 
-            # 使用缩进美化 JSON 输出，确保 UTF-8 编码
             with open(self.config_file_path, 'w', encoding='utf-8') as f:
                 json.dump(config_data, f, indent=4, ensure_ascii=False)
             log.info(f"配置已成功保存到: {self.config_file_path}")
