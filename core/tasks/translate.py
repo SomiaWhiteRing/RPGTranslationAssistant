@@ -4,6 +4,7 @@ import json
 import csv
 import re
 import time
+import math
 import datetime
 import logging
 import queue
@@ -70,90 +71,97 @@ def _build_glossary_section(dictionary, entry_format_str, header_line, keys_in_f
 
     return section_text
 
-def _create_chunks(items, config, character_glossary_text, entity_glossary_text):
+def _create_chunks_more_even(items, config):
     """
-    根据 Token 限制将待翻译条目划分为块。
-    修复了基础 Prompt Token 估算中的 KeyError。
+    尝试更均匀地划分块，基于预估的块数和平均行数。
     """
     chunks = []
-    current_chunk = []
-    current_chunk_text_tokens = 0
+    total_items = len(items)
+    if total_items == 0:
+        return chunks
 
-    max_tokens_per_chunk = config.get("chunk_max_tokens", DEFAULT_TRANSLATE_CONFIG["chunk_max_tokens"])
-    prompt_template = config.get("prompt_template", DEFAULT_TRANSLATE_CONFIG["prompt_template"])
-    correction_prompt_template = config.get("prompt_template_correction", DEFAULT_TRANSLATE_CONFIG["prompt_template_correction"])
+    max_tokens_per_text_block = config.get("chunk_max_tokens", DEFAULT_TRANSLATE_CONFIG["chunk_max_tokens"])
+    line_number_width = len(str(total_items))
 
-
-    # 估算基础 Prompt 和术语表的 Token
-    base_prompt_placeholders = {
-        "source_language": config.get("source_language", ""),
-        "target_language": config.get("target_language", ""),
-        "character_glossary_section": "",
-        "entity_glossary_section": "",
-        "context_section": "",
-        "input_block_text": "", # <--- 修复 KeyError
-        "target_language_placeholder": config.get("target_language", ""),
-    }
-    # 修正 Prompt 的占位符也类似，可能包含 optional_failure_reason_guidance
-    correction_placeholders = base_prompt_placeholders.copy()
-    correction_placeholders["optional_failure_reason_guidance"] = ""
-
-
-    try:
-        base_prompt_text = prompt_template.format_map(base_prompt_placeholders)
-        correction_prompt_text = correction_prompt_template.format_map(correction_placeholders)
-        # 取两者中较长的作为估算基准，因为修正 prompt 可能更长
-        base_prompt_tokens = _estimate_tokens(max(base_prompt_text, correction_prompt_text, key=len))
-    except KeyError as e:
-        log.warning(f"Prompt 模板中包含无法识别的占位符: {e}，Token 估算可能不准。")
-        base_prompt_tokens = 500 # 给一个默认估算值
-
-    glossary_tokens = _estimate_tokens(character_glossary_text) + _estimate_tokens(entity_glossary_text)
-
-    OUTPUT_BUFFER_TOKENS = 16384
-    EXTRA_BUFFER = 1000
-    AVAILABLE_TOKENS_FOR_TEXT = max_tokens_per_chunk - base_prompt_tokens - glossary_tokens - OUTPUT_BUFFER_TOKENS - EXTRA_BUFFER
-
-    if AVAILABLE_TOKENS_FOR_TEXT <= 0:
-         log.error(f"配置错误：可用文本 Token 不足 ({AVAILABLE_TOKENS_FOR_TEXT})。")
-         AVAILABLE_TOKENS_FOR_TEXT = 1000
-
-    log.info(f"分块计算：总上限={max_tokens_per_chunk}, Prompt框架~={base_prompt_tokens}, 术语表~={glossary_tokens}, 输出预留={OUTPUT_BUFFER_TOKENS}, 文本可用~={AVAILABLE_TOKENS_FOR_TEXT}")
-
-    line_number_width = len(str(len(items))) if items else 1
-
-    for i, (original_key, original_value) in enumerate(items):
+    # 1. 估算总文本 Token (需要遍历一次)
+    total_text_tokens = 0
+    item_token_list = [] # 存储每行的 token 数，避免重复计算
+    for i, (original_key, _) in enumerate(items):
         processed_key = text_processing.pre_process_text_for_llm(original_key)
         line_marker = f"[LINE_{i+1:0{line_number_width}d}]"
         line_text_for_token = f"{line_marker}{processed_key}\n"
         item_tokens = _estimate_tokens(line_text_for_token)
+        item_token_list.append(item_tokens)
+        total_text_tokens += item_tokens
 
-        if current_chunk_text_tokens + item_tokens <= AVAILABLE_TOKENS_FOR_TEXT:
-            current_chunk.append((original_key, original_value))
-            current_chunk_text_tokens += item_tokens
-        else:
-            if current_chunk:
-                chunks.append(current_chunk)
-                log.debug(f"创建块 {len(chunks)}，行数 {len(current_chunk)}，文本 Tokens ~={current_chunk_text_tokens}")
+    log.info(f"预估总文本 Tokens: {total_text_tokens}")
 
-            if item_tokens > AVAILABLE_TOKENS_FOR_TEXT:
-                log.warning(f"单行文本过长! 行号: {i+1}, Tokens~={item_tokens}, 可用={AVAILABLE_TOKENS_FOR_TEXT}. 原文: '{original_key[:100]}...' 强制单行块。")
-                current_chunk = [(original_key, original_value)]
-                chunks.append(current_chunk)
-                log.debug(f"创建单行超长块 {len(chunks)}，文本 Tokens ~={item_tokens}")
-                current_chunk = []
-                current_chunk_text_tokens = 0
-            else:
-                current_chunk = [(original_key, original_value)]
-                current_chunk_text_tokens = item_tokens
+    if total_text_tokens == 0: # 如果所有行都是空的
+         if items: return [items] # 将所有空行放一个块
+         else: return []
 
-    if current_chunk:
-        chunks.append(current_chunk)
-        log.debug(f"创建最后一个块 {len(chunks)}，行数 {len(current_chunk)}，文本 Tokens ~={current_chunk_text_tokens}")
+    # 2. 计算期望的块数
+    num_chunks = math.ceil(total_text_tokens / max_tokens_per_text_block)
+    # 确保至少有一个块
+    num_chunks = max(1, num_chunks)
+    log.info(f"根据文本 Token 上限 ({max_tokens_per_text_block})，预计划分为 {num_chunks} 个块。")
 
-    log.info(f"总共 {len(items)} 行被划分成 {len(chunks)} 个块。")
+    # 3. 计算平均每块 Item 数量 (向下取整，最后一个块处理剩余)
+    # avg_items_per_chunk = total_items // num_chunks
+    # 优化：使用更精确的划分点
+    target_items_per_chunk = math.ceil(total_items / num_chunks)
+
+    # 4. 划分块
+    start_index = 0
+    current_chunk_tokens = 0 # 当前块已累加的token
+    current_chunk_items = []
+
+    for i in range(total_items):
+        item_tokens = item_token_list[i]
+        original_key, original_value = items[i]
+
+        # 判断是否需要结束当前块
+        # 条件1：当前块已达到目标行数
+        # 条件2：当前块 Token 加上新行会超过上限 (安全检查)
+        # 条件3：当前行是最后一行
+        force_new_chunk = False
+        if len(current_chunk_items) >= target_items_per_chunk:
+             force_new_chunk = True
+        if current_chunk_tokens + item_tokens > max_tokens_per_text_block and len(current_chunk_items) > 0:
+             log.warning(f"块 {len(chunks)+1} 在达到目标行数前 Token 超限 ({current_chunk_tokens + item_tokens} > {max_tokens_per_text_block})，强制分块。")
+             force_new_chunk = True
+
+        if force_new_chunk:
+             chunks.append(current_chunk_items)
+             log.debug(f"创建块 {len(chunks)}，行数 {len(current_chunk_items)}，文本 Tokens ~={current_chunk_tokens}")
+             current_chunk_items = []
+             current_chunk_tokens = 0
+
+        # 添加当前行到块
+        current_chunk_items.append((original_key, original_value))
+        current_chunk_tokens += item_tokens
+
+        # 如果因为Token超限导致单行成块，单独处理 (虽然理论上基于平均行数划分不易出现)
+        if item_tokens > max_tokens_per_text_block and len(current_chunk_items) == 1:
+             log.warning(f"单行文本过长! 行号: {i+1}, Tokens~={item_tokens}. 强制单行块。")
+             chunks.append(current_chunk_items)
+             log.debug(f"创建单行超长块 {len(chunks)}，文本 Tokens ~={current_chunk_tokens}")
+             current_chunk_items = []
+             current_chunk_tokens = 0
+
+
+    # 添加最后一个块
+    if current_chunk_items:
+        chunks.append(current_chunk_items)
+        log.debug(f"创建最后一个块 {len(chunks)}，行数 {len(current_chunk_items)}，文本 Tokens ~={current_chunk_tokens}")
+
+    # 验证块数量是否符合预期 (可能因为单行超长等原因略有偏差)
+    if len(chunks) != num_chunks:
+         log.warning(f"实际块数 ({len(chunks)}) 与预计算块数 ({num_chunks}) 不符，可能是由于文本行长度分布不均导致。")
+    else:
+         log.info(f"成功将 {total_items} 行划分为 {len(chunks)} 个近似均衡的块。")
+
     return chunks
-
 
 # --- 核心翻译函数 (第一轮) ---
 def _translate_single_chunk(
@@ -230,10 +238,14 @@ def _translate_single_chunk(
 
         # (后续的错误记录、解析、验证逻辑与上一个版本相同)
         last_error_info = { # 更新错误信息记录
-            "attempt": attempt + 1, "prompt_size": len(current_final_prompt),
-            "model": model_name, "api_success": success,
+            "attempt": attempt + 1, 
+            "prompt_size": len(current_final_prompt),
+            "model": model_name, 
+            "api_success": success,
             "api_response_len": len(response_content) if response_content else 0,
-            "api_error": error_message if not success else None, "validation_reason": None,
+            "api_error": error_message if not success else None, 
+            "validation_reason": None,
+            "api_response": response_content if response_content else "", # 记录响应体
         }
 
         if not success:
@@ -246,6 +258,8 @@ def _translate_single_chunk(
                         elog.write(f"  失败原因: {error_message}\n")
                         elog.write(f"  模型: {model_name}\n")
                         elog.write(f"  Prompt 大小: {last_error_info['prompt_size']} 字符\n")
+                        elog.write(f"  API 响应长度: {last_error_info['api_response_len']} 字符\n")
+                        if last_error_info.get('api_response'): elog.write(f"  API 响应: {last_error_info['api_response']}\n")
                         elog.write("-" * 20 + "\n")
             except Exception as log_err: log.error(f"写入 API 错误日志失败: {log_err}")
             if attempt < max_retries: time.sleep(1.5 ** attempt); continue
@@ -410,13 +424,14 @@ def _translate_single_correction_chunk(
     if not success:
         log.error(f"修正块 {chunk_index+1}/{total_chunks} API 调用失败: {error_message}")
         final_results = [(key, value, 'correction_failed') for key, value in chunk_items]
-        # (记录日志...)
         try:
              with error_log_lock:
                   with open(error_log_path, 'a', encoding='utf-8') as elog:
                       elog.write(f"[{datetime.datetime.now().isoformat()}] 修正块翻译 API 调用失败 (块 {chunk_index+1}/{total_chunks})\n")
                       elog.write(f"  失败原因: {error_message}\n")
                       elog.write(f"  模型: {model_name}\n")
+                      # *** 添加记录原始响应体 ***
+                      elog.write(f"  API 原始响应体 (前 1000 字符):\n{str(response_content)[:1000]}...\n")
                       elog.write("-" * 20 + "\n")
         except Exception as log_err: log.error(f"写入修正块 API 错误日志失败: {log_err}")
         return final_results
@@ -425,6 +440,17 @@ def _translate_single_correction_chunk(
     match = re.search(r'<output_block>(.*?)</output_block>', response_content, re.DOTALL)
     if not match:
         log.error(f"修正块 {chunk_index+1}/{total_chunks} API 响应未找到 <output_block>。")
+        # *** 添加记录响应体到错误日志 ***
+        try:
+            with error_log_lock:
+                with open(error_log_path, 'a', encoding='utf-8') as elog:
+                    elog.write(f"[{datetime.datetime.now().isoformat()}] 修正块翻译失败：缺少output_block (块 {chunk_index+1}/{total_chunks})\n")
+                    elog.write(f"  模型: {model_name}\n")
+                    elog.write(f"  API 原始响应体:\n{response_content}\n") # 记录完整响应体
+                    elog.write("-" * 20 + "\n")
+        except Exception as log_err:
+            log.error(f"写入修正块缺少 output_block 错误日志失败: {log_err}")
+        # *** 结束添加 ***
         final_results = [(key, value, 'correction_failed') for key, value in chunk_items]
         return final_results
 
@@ -684,9 +710,10 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
         entity_keys = ['原文', '译文', '类别', '描述']
         entity_format_combined = "{原文}|{译文}|{类别} - {描述}"
         entity_header_combined = "### 事物术语表 (格式: 原文|译文|类别 - 描述)"
+        entity_keys_for_format = ['原文', '译文', '类别', '描述']
         entity_glossary_txt = _build_glossary_section(entity_dictionary, entity_format_combined, entity_header_combined, entity_keys_for_format)
 
-        chunks = _create_chunks(original_items, config, char_glossary_txt, entity_glossary_txt)
+        chunks = _create_chunks_more_even(original_items, config)
         total_chunks = len(chunks)
         if total_chunks == 0 and total_items > 0: raise RuntimeError("未能成功划分翻译块。")
         elif total_chunks == 0 and total_items == 0: message_queue.put(("warning", "无内容需翻译。")); message_queue.put(("status", "翻译完成")); message_queue.put(("done", None)); return
@@ -750,7 +777,7 @@ def run_translate(game_path, works_dir, translate_config, world_dict_config, mes
             message_queue.put(("log", ("warning", f"检测到 {total_failed_count} 行需要修正。")))
             message_queue.put(("status", f"开始第二轮修正，共 {total_failed_count} 行..."))
 
-            correction_chunks = _create_chunks(failed_lines_for_correction, config, char_glossary_txt, entity_glossary_txt)
+            correction_chunks = _create_chunks_more_even(original_items, config)
             total_correction_chunks = len(correction_chunks)
             log.info(f"{total_failed_count} 行失败条目被划分成 {total_correction_chunks} 个修正块。")
 

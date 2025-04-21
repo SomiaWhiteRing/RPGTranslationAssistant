@@ -61,7 +61,7 @@ DEFAULT_TRANSLATE_CONFIG = {
     # 使用 Gemini 2.5 Flash Preview 模型进行翻译，性价比高
     "model": "gemini-2.5-flash-preview-04-17",
     # 块最大 Token 数 (输入)，略小于模型上限以留出余量给 Prompt 和输出
-    "chunk_max_tokens": 1000000,
+    "chunk_max_tokens": 60000,
     # 并发数，用于控制同时处理多少个文本块的线程数量
     "concurrency": 16,
     # 单个块翻译失败时的最大重试次数
