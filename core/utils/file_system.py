@@ -67,8 +67,8 @@ def get_application_path():
         return os.path.dirname(os.path.abspath(sys.argv[0]))
 
 def get_modules_path():
-    """Return the external modules directory beside the packaged executable."""
-    return os.path.join(get_executable_dir() if getattr(sys, 'frozen', False) else get_application_path(), "modules")
+    """Return modules from bundled resources or the source application directory."""
+    return os.path.join(get_application_path(), "modules")
 
 def get_executable_dir():
     """获取可执行文件所在的目录。

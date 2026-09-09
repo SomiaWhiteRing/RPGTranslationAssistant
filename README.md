@@ -54,11 +54,12 @@
 
 5. 打包内容说明（由 spec 与打包步骤配置）
    - 代码入口：`main.py`
-   - 资源与数据（运行库位于 `_internal`；`modules`、`tools` 与可执行文件同级）：
+   - 资源与数据（运行库、`modules` 和 `assets` 位于 `_internal`；`tools` 与可执行文件同级）：
       - `modules/EasyRPG`, `modules/RPGRewriter`, `modules/UberWolf`, `modules/WOLF`, `modules/RTPCollection`, `modules/dict`
       - `tools`（翻译辅助工具目录）
       - `assets/icon.ico`（应用图标）
    - 运行时自动生成（与可执行文件同级）：
+     - `dict`（可编辑基础字典，缺失时从内置模板复制，已有文件保持不变）
      - `Works`（工作目录）
      - `app_config.json`（配置文件）
 

@@ -5,6 +5,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
+        ('modules', 'modules'),
         ('assets/icon.ico', 'assets')
     ],
     hiddenimports=[
