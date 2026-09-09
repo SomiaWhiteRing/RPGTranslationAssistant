@@ -9,6 +9,7 @@ a = Analysis(
         ('assets/icon.ico', 'assets')
     ],
     hiddenimports=[
+        'difflib',  # Imported by the external proofreading tool.
         'google.genai',
         'google.genai.types',
         'google.api_core.exceptions',
