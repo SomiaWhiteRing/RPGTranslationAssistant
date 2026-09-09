@@ -469,6 +469,7 @@ class TranslateConfigWindow(tk.Toplevel):
         self.batch_var = tk.IntVar(value=self.config.get("batch_size", DEFAULT_TRANSLATE_CONFIG["batch_size"]))
         self.context_var = tk.IntVar(value=self.config.get("context_lines", DEFAULT_TRANSLATE_CONFIG["context_lines"]))
         self.concur_var = tk.IntVar(value=self.config.get("concurrency", DEFAULT_TRANSLATE_CONFIG["concurrency"]))
+        self.retry_failed_items_var = tk.BooleanVar(value=self.config.get("retry_failed_items_only", False))
         self.source_lang_var = tk.StringVar(value=self.config.get("source_language", DEFAULT_TRANSLATE_CONFIG["source_language"]))
         self.target_lang_var = tk.StringVar(value=self.config.get("target_language", DEFAULT_TRANSLATE_CONFIG["target_language"]))
         self.show_key_var = tk.BooleanVar(value=False)
@@ -566,8 +567,55 @@ class TranslateConfigWindow(tk.Toplevel):
         row_idx += 1
 
         # Buttons
-        button_frame = ttk.Frame(frame)
-        button_frame.grid(row=row_idx, column=0, columnspan=4, pady=10, sticky="e")
+        footer = ttk.Frame(frame)
+        footer.grid(row=row_idx, column=0, columnspan=4, pady=10, sticky="ew")
+        ttk.Checkbutton(
+            footer, text="新版回退重试（实验性）",
+            variable=self.retry_failed_items_var,
+        ).pack(side=tk.LEFT, padx=(5, 0))
+        help_icon = ttk.Label(footer, text="ⓘ", cursor="question_arrow", takefocus=True)
+        help_icon.pack(side=tk.LEFT, padx=(4, 5))
+        tooltip = None
+
+        def show_tooltip(_event):
+            nonlocal tooltip
+            if tooltip is not None:
+                return
+            tooltip = tk.Toplevel(self)
+            tooltip.overrideredirect(True)
+            tk.Label(
+                tooltip,
+                text=(
+                    "针对DeepSeek模型迭代后高报错率的情况，\n提供实验性的回退重试新逻辑。\n\n"
+                    "开启时每轮保留通过校验的译文，仅重试失败条目；\n"
+                    "重试时附上具体错误，已有回复时一并提供，帮助模型修正。\n"
+                    "重试耗尽后，仅对剩余失败项拆批或回退原文。\n\n"
+                    "实验性功能的效果取决于模型和文本，可能改变译文结果与请求次数，\n"
+                    "不保证降低失败率或费用；效果不理想时可关闭。"
+                ),
+                justify=tk.LEFT, wraplength=360, padx=10, pady=8,
+                background="#ffffe1", foreground="#202020",
+                relief=tk.SOLID, borderwidth=1,
+            ).pack()
+            tooltip.update_idletasks()
+            x = min(help_icon.winfo_rootx(), tooltip.winfo_screenwidth() - tooltip.winfo_reqwidth() - 8)
+            y = help_icon.winfo_rooty() - tooltip.winfo_reqheight() - 6
+            tooltip.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+        def hide_tooltip(_event):
+            nonlocal tooltip
+            if tooltip is not None:
+                tooltip.destroy()
+                tooltip = None
+
+        help_icon.bind("<Enter>", show_tooltip)
+        help_icon.bind("<Leave>", hide_tooltip)
+        help_icon.bind("<FocusIn>", show_tooltip)
+        help_icon.bind("<FocusOut>", hide_tooltip)
+        help_icon.bind("<Escape>", hide_tooltip)
+
+        button_frame = ttk.Frame(footer)
+        button_frame.pack(side=tk.RIGHT)
 
         self.test_button = ttk.Button(button_frame, text="测试连接", command=self._test_connection)
         self.test_button.pack(side=tk.LEFT, padx=5)
@@ -614,6 +662,17 @@ class TranslateConfigWindow(tk.Toplevel):
         if not self.initializing and self.prompt_text.edit_modified():
             self.prompt_text.edit_modified(False)
             self._on_config_change()
+
+    def _on_config_change(self, *args):
+        """仅连接参数变化时撤销已通过的连接检查。"""
+        if self.initializing or not args:
+            return
+        connection_variables = (self.api_url_var, self.api_key_var, self.model_var)
+        if str(args[0]) not in {str(variable) for variable in connection_variables}:
+            return
+        self.connection_tested_ok = False
+        self.save_button.config(state=tk.DISABLED)
+        self._set_status("连接配置已修改，请重新测试连接", "orange")
 
     def _set_status(self, message, color):
         """Update status label."""
@@ -695,6 +754,7 @@ class TranslateConfigWindow(tk.Toplevel):
         self.config["batch_size"] = batch_size
         self.config["context_lines"] = context_lines
         self.config["concurrency"] = concurrency
+        self.config["retry_failed_items_only"] = self.retry_failed_items_var.get()
         self.config["source_language"] = self.source_lang_var.get()
         self.config["target_language"] = self.target_lang_var.get()
         self.config["prompt_template"] = self.prompt_text.get("1.0", tk.END).strip()

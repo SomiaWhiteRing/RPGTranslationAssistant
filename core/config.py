@@ -67,6 +67,7 @@ DEFAULT_TRANSLATE_CONFIG = {
     "context_lines": 8, 
     "concurrency": 16,
     "max_retries": 1,
+    "retry_failed_items_only": False,
     "source_language": "日语",
     "target_language": "简体中文",
     # 更新Prompt模板
