@@ -161,7 +161,6 @@ class RPGMakerProofreadingApp(LegacyWorkbenchApp):
             self.source_type.set("txt")
         if initial_input or initial_origin_dir or initial_translated_dir:
             self._update_source_visibility()
-            self.after_idle(self._scan_source)
 
     @staticmethod
     def _app_dir() -> Path:

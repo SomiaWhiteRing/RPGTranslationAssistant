@@ -1,695 +1,916 @@
 from __future__ import annotations
 
-import csv
 import argparse
-import json
-import math
-import re
-import shutil
-import sys
-import tkinter as tk
-from dataclasses import replace as dataclass_replace
+import csv
+from dataclasses import replace as dc_replace
 from pathlib import Path
-from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
-from typing import Iterable
+from types import SimpleNamespace
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
-from workbench_app_v4 import RPGMakerProofreadingApp as V4App, DICT_CATEGORIES, QUOTE_STYLE_LABELS
+from workbench_app_v43 import RPGMakerProofreadingApp as V43App
+from workbench_app_v4 import RPGMakerProofreadingApp as V4App
 from workbench_core import (
-    CombinedQuoteAnalysisRow,
     DataRecord,
+    DictionaryWarning,
     EditableDictionaryRow,
-    EllipsisOccurrence,
+    ErrorAlias,
     QAError,
-    QUOTE_PAIRS,
     TextChange,
-    _outer_quote_info,
-    analyze_alnum_occurrences,
-    analyze_ellipsis_occurrences,
-    analyze_quote_combined,
-    build_ellipsis_conversion,
-    build_quote_situation_proposal,
-    build_quote_style_proposal,
-    build_used_dictionary,
-    case_format_matches,
-    case_profile,
-    dictionary_entries_from_rows,
+    analyze_dictionary,
+    analyze_dunhao_usage,
+    analyze_english_period_endings,
+    analyze_space_structure,
+    analyze_missing_translations,
+    analyze_width,
+    build_error_alias_changes,
+    remove_translation_trailing_spaces,
+    replace_dunhao_all,
+    replace_dunhao_line_end,
+    replace_terminal_english_period,
+    sync_missing_source_leading_spaces,
+    extract_database_dictionary_rows,
+    is_face_message,
+    is_narration_message,
+    load_error_aliases,
     load_editable_dictionary,
-    open_file,
+    logical_fullwidth_units,
+    normalize_newlines,
     render_rm2k3_controls,
-    save_dictionary,
-    strip_control_codes,
-    transform_outside_controls,
-    width_format_matches,
-    width_profile,
+    save_error_aliases,
+    warning_is_covered_by_alias,
 )
 
-APP_TITLE = "RPG制作大师校对工具 v4.1"
-CONFIG_NAME = "rpg_maker_proofreading_tool_config_v41.json"
-
-TEXT_FILTER_COLUMNS = {
-    "original", "translated", "proposal", "proposed", "reason", "file", "baseline",
-    "term", "expected", "translation", "files", "found", "description", "custom",
-    "replacement_desc", "symbol", "original_name",
-}
-FIXED_FILTER_COLUMNS = {
-    "use", "status", "mode", "marker", "type", "side", "kind", "manual", "control",
-    "field", "category", "confidence", "match", "situation_match", "style_match",
-    "source_profile", "translated_profile", "face_type", "batch", "group",
-}
+APP_TITLE = "RPG制作大师校对工具 v4.5.0"
+CONFIG_NAME = "rpg_maker_proofreading_tool_config_v42.json"  # keep prior preferences
 
 
-class MultiChoiceFilterDialog(tk.Toplevel):
-    def __init__(self, parent, title: str, values: list[str]):
-        super().__init__(parent)
-        self.title(title); self.transient(parent); self.grab_set(); self.geometry("430x560")
-        self.result: set[str] | None = None
-        self.vars: dict[str, tk.BooleanVar] = {v: tk.BooleanVar(value=True) for v in values}
-        top = ttk.Frame(self, padding=8); top.pack(fill="both", expand=True)
-        actions = ttk.Frame(top); actions.pack(fill="x")
-        ttk.Button(actions, text="全选", command=lambda: self._set_all(True)).pack(side="left")
-        ttk.Button(actions, text="全不选", command=lambda: self._set_all(False)).pack(side="left", padx=5)
-        canvas = tk.Canvas(top, highlightthickness=0)
-        scroll = ttk.Scrollbar(top, orient="vertical", command=canvas.yview)
-        inner = ttk.Frame(canvas)
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scroll.set)
-        canvas.pack(side="left", fill="both", expand=True, pady=8); scroll.pack(side="right", fill="y", pady=8)
-        for value in values:
-            label = value if value else "（空白）"
-            ttk.Checkbutton(inner, text=label, variable=self.vars[value]).pack(anchor="w", padx=4, pady=2)
-        bottom = ttk.Frame(self, padding=(8, 0, 8, 8)); bottom.pack(fill="x")
-        ttk.Button(bottom, text="确定", command=self._ok).pack(side="right")
-        ttk.Button(bottom, text="取消", command=self.destroy).pack(side="right", padx=5)
-        self.bind("<Escape>", lambda e: self.destroy())
-        self.wait_visibility(); self.focus_set()
-
-    def _set_all(self, state: bool):
-        for var in self.vars.values(): var.set(state)
-
-    def _ok(self):
-        self.result = {v for v, var in self.vars.items() if var.get()}
-        self.destroy()
-
-
-class CategoryDialog(tk.Toplevel):
-    def __init__(self, parent, filename: str):
-        super().__init__(parent)
-        self.title("设置辞典类别"); self.transient(parent); self.grab_set(); self.resizable(False, False)
-        self.result: str | None = None
-        ttk.Label(self, text=f"辞典没有“类别”列：\n{filename}\n请选择整个辞典使用的类别：", justify="left").pack(anchor="w", padx=12, pady=(12, 6))
-        self.var = tk.StringVar(value="其他")
-        combo = ttk.Combobox(self, textvariable=self.var, values=DICT_CATEGORIES, width=28)
-        combo.pack(fill="x", padx=12); combo.focus_set()
-        bar = ttk.Frame(self); bar.pack(fill="x", padx=12, pady=12)
-        ttk.Button(bar, text="确定", command=self._ok).pack(side="right")
-        ttk.Button(bar, text="取消", command=self.destroy).pack(side="right", padx=5)
-        self.wait_visibility()
-
-    def _ok(self):
-        self.result = self.var.get().strip() or "其他"
-        self.destroy()
-
-
-class RPGMakerProofreadingApp(V4App):
+class RPGMakerProofreadingApp(V43App):
     @staticmethod
     def _app_dir() -> Path:
-        # Source mode: the script directory.  PyInstaller one-file mode: keep
-        # editable configuration and reference documents beside the EXE rather
-        # than inside the temporary _MEIPASS directory.
-        if getattr(sys, "frozen", False):
-            return Path(sys.executable).resolve().parent
         return Path(__file__).resolve().parent
 
     @staticmethod
     def _bundle_dir() -> Path:
-        return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        return Path(__file__).resolve().parent
 
-    def _ensure_external_resource(self, relative: str):
-        target = self._app_dir() / relative
-        if target.exists():
-            return
-        source = self._bundle_dir() / relative
-        if source.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-
-    def __init__(self, initial_input=None, initial_origin_dir=None, initial_translated_dir=None):
-        super().__init__(
-            initial_input=initial_input,
-            initial_origin_dir=initial_origin_dir,
-            initial_translated_dir=initial_translated_dir,
-        )
+    def __init__(self, initial_input=None, initial_origin_dir=None, initial_translated_dir=None,
+                 initial_dictionaries=None):
+        self.missing_exclusions: set[str] = set()
+        self.review_term_filter: str | None = None
+        self.review_force_show_alias_managed = False
+        super().__init__()
         self.title(APP_TITLE)
-        self.config_path = self._app_dir() / CONFIG_NAME
-        self.config_dir = self._app_dir() / "配置"
-        self.reference_dir = self._app_dir() / "资料"
-        self.config_dir.mkdir(exist_ok=True); self.reference_dir.mkdir(exist_ok=True)
-        # In packaged builds the defaults are bundled, then copied beside the
-        # EXE on first run so the user can open and edit them normally.
-        for rel in (
-            "配置/标点符号分类.json",
-            "资料/RPG_Maker_2000_2003_操作符一览.json",
-            "资料/RPG_Maker_2000_2003_操作符一览.txt",
-        ):
-            self._ensure_external_resource(rel)
-        self.catalog_path = self.config_dir / "标点符号分类.json"
-        # Compatibility migration from v4.0's root-level catalogue.
-        old_catalog = self._app_dir() / "标点符号分类.json"
-        if not self.catalog_path.exists() and old_catalog.exists():
-            self.catalog_path.write_bytes(old_catalog.read_bytes())
-        self.control_catalog_path = self.reference_dir / "RPG_Maker_2000_2003_操作符一览.json"
-        self.control_doc_path = self.reference_dir / "RPG_Maker_2000_2003_操作符一览.txt"
-        # Parent v4 loads its own config filename during super().__init__().
-        # Reload after switching to the v4.1 filename so v4.1 preferences persist.
-        self._load_settings()
+        self._initial_input = initial_input
+        self._initial_origin_dir = initial_origin_dir
+        self._initial_translated_dir = initial_translated_dir
         self._apply_initial_input()
-        self._annotate_dynamic_rows()
-        self._apply_font()
+        self._initial_dictionaries = initial_dictionaries or []
+        self._startup_checks_pending = True
+        self.after_idle(self._start_initial_checks)
 
-    def _annotate_dynamic_rows(self):
+    def _start_initial_checks(self):
+        for value in self._initial_dictionaries:
+            path = Path(value)
+            if not path.is_file():
+                continue
+            try:
+                self.dictionary_rows.extend(load_editable_dictionary(path))
+            except Exception as exc:
+                messagebox.showerror("启动辞典导入失败", f"{path}\n{exc}", parent=self)
+        self._refresh_dictionary_tree()
+        snap = self._source_snapshot()
+        paths = {"json": ("json",), "txt": ("origin", "translated"), "excel": ("excel",)}[snap["kind"]]
+        if not all(str(snap[key]) != "." and snap[key].exists() for key in paths):
+            self.status_var.set("请选择有效的数据源；首次加载后将自动运行检查。")
+            return
+        self._scan_source()
+
+    def _scan_done(self, result):
+        super()._scan_done(result)
+        if self._startup_checks_pending and self.all_records:
+            self._startup_checks_pending = False
+            checks = [
+                self._do_width,
+                self._do_speaker,
+                self._do_quote_analysis,
+                self._do_punct,
+                self._refresh_symbol_catalog,
+                self._do_ellipsis_scan,
+                self._scan_english_period,
+                self._scan_dunhao,
+                self._scan_spaces,
+                lambda: self._scan_alnum("case"),
+                lambda: self._scan_alnum("charwidth"),
+                self._do_duplicates,
+                self._do_missing,
+            ]
+            if self.dictionary_rows:
+                checks.append(self._initial_dictcheck)
+            self.after_idle(lambda: self._run_initial_check(iter(checks)))
+
+    def _initial_dictcheck(self):
+        entries = self._resolve_conflicts(self.dictionary_rows)
+        if entries is not None:
+            self._show_dict_warnings(self._dictionary_warnings(entries))
+
+    def _run_initial_check(self, checks):
+        check = next(checks, None)
+        if check is None:
+            self.status_var.set("启动检查结束，请在各页面查看结果。")
+            return
         try:
-            tab = self.tabs["settings"]
-            src = next(w for w in tab.winfo_children() if isinstance(w, ttk.LabelFrame) and "数据源" in str(w.cget("text")))
-            ttk.Label(src, text="显示分行时按当前可见内容自动调整列表行高：最多显示5行；超过5行时额外显示半行提示。", foreground="#555").grid(
-                row=9, column=0, columnspan=4, sticky="w", pady=(3, 0))
+            check()
+        except Exception as exc:
+            messagebox.showerror("启动检查失败", str(exc), parent=self)
+        self.after(1, lambda: self._run_initial_check(checks))
+
+    # ------------------------------------------------------------------
+    # Width analysis: Ambiguous width + adjustable panes + integrated rulers
+    # ------------------------------------------------------------------
+    def _build_width(self):
+        super()._build_width()
+        tab = self.tabs["width"]
+        self.ambiguous_unit = tk.DoubleVar(value=0.5)
+        self.width_text_height = tk.IntVar(value=6)
+        self.width_preview_height = tk.IntVar(value=220)
+        self.width_show_texts = tk.BooleanVar(value=True)
+        self.width_show_preview = tk.BooleanVar(value=True)
+
+        self.width_dual_pane = self.width_original_box.master.master
+        self.width_preview_frame = self.width_canvas.master
+        self.width_original_ruler = self._install_text_ruler(self.width_original_box)
+        self.width_translation_ruler = self._install_text_ruler(self.width_translation_box)
+
+        self.width_layout_ctl = ttk.LabelFrame(tab, text="宽度显示与框架高度", padding=4)
+        ctl = self.width_layout_ctl
+        ctl.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        ttk.Label(ctl, text="Ambiguous字符单位：").pack(side="left")
+        ttk.Combobox(ctl, textvariable=self.ambiguous_unit, state="readonly", values=[0.5, 1.0], width=5).pack(side="left")
+        ttk.Label(ctl, text="（如 ·；实际字体仍以像素线为准）").pack(side="left", padx=(2, 10))
+        ttk.Label(ctl, text="原/译文框高：").pack(side="left")
+        ttk.Spinbox(ctl, from_=3, to=18, textvariable=self.width_text_height, width=5, command=self._apply_width_layout).pack(side="left")
+        ttk.Label(ctl, text="预览高：").pack(side="left", padx=(8, 2))
+        ttk.Spinbox(ctl, from_=120, to=700, increment=20, textvariable=self.width_preview_height, width=6, command=self._apply_width_layout).pack(side="left")
+        ttk.Checkbutton(ctl, text="显示原文/译文部分", variable=self.width_show_texts, command=self._apply_width_layout).pack(side="left", padx=8)
+        ttk.Checkbutton(ctl, text="显示当前字体预览", variable=self.width_show_preview, command=self._apply_width_layout).pack(side="left")
+        ttk.Button(ctl, text="应用高度", command=self._apply_width_layout).pack(side="right")
+        self._apply_width_layout()
+        self._install_width_vertical_layout()
+
+    def _install_text_ruler(self, text_widget: tk.Text):
+        parent = text_widget.master
+        # Shift existing text + scrollbars one row down once.
+        for child in parent.grid_slaves():
+            info = child.grid_info()
+            try:
+                row = int(info.get("row", 0))
+            except Exception:
+                row = 0
+            child.grid_configure(row=row + 1)
+        parent.rowconfigure(0, weight=0); parent.rowconfigure(1, weight=1)
+        ruler = tk.Canvas(parent, height=26, background="#f8f8f8", highlightthickness=0)
+        ruler.grid(row=0, column=0, sticky="ew")
+        ruler.bind("<Configure>", lambda e, c=ruler: self._draw_text_ruler(c))
+        return ruler
+
+    def _draw_text_ruler(self, canvas: tk.Canvas):
+        if not canvas.winfo_exists(): return
+        canvas.delete("all")
+        font = self._font_object(); charw = max(1, font.measure("汉")); h = max(24, canvas.winfo_height())
+        max_units = max(30, int(canvas.winfo_width() / charw) + 2)
+        for unit in range(0, max_units + 1):
+            x = 4 + unit * charw
+            major = unit % 5 == 0
+            canvas.create_line(x, h - (14 if major else 7), x, h, fill="#777" if major else "#bbb")
+            if major and unit:
+                canvas.create_text(x + 2, 2, anchor="nw", text=str(unit), font=(font.actual("family"), max(7, font.actual("size") - 2)), fill="#555")
+        for unit, color, label in [(float(self.face_limit.get()), "#2b6cb0", "头像"), (float(self.narr_limit.get()), "#c53030", "无头像")]:
+            x = 4 + unit * charw
+            canvas.create_line(x, 0, x, h, fill=color, width=2)
+            canvas.create_text(x + 2, h - 14, anchor="nw", text=label, fill=color, font=(font.actual("family"), 7))
+
+    def _refresh_all_rulers(self):
+        for name in ["width_original_ruler", "width_translation_ruler", "editor_original_ruler", "editor_translation_ruler"]:
+            c = getattr(self, name, None)
+            if c is not None:
+                try: self._draw_text_ruler(c)
+                except Exception: pass
+
+    def _apply_font(self):
+        super()._apply_font()
+        try: self._refresh_all_rulers()
+        except Exception: pass
+
+    def _apply_width_layout(self):
+        try:
+            h = max(3, int(self.width_text_height.get())); ph = max(100, int(self.width_preview_height.get()))
+            self.width_original_box.configure(height=h); self.width_translation_box.configure(height=h)
+            self.width_canvas.configure(height=ph)
+            if self.width_show_texts.get(): self.width_dual_pane.grid()
+            else: self.width_dual_pane.grid_remove()
+            if self.width_show_preview.get(): self.width_preview_frame.grid()
+            else: self.width_preview_frame.grid_remove()
+            self._refresh_all_rulers(); self._draw_width_preview()
+            if hasattr(self,"width_sash_top"): self._sync_width_grid_sizes()
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # Tree filtering, visible-only selection, and adaptive multiline display
-    # ------------------------------------------------------------------
-    def _tree(self, parent, columns, headings, widths, checkbox=False):
-        tree = super()._tree(parent, columns, headings, widths, checkbox)
-        seq = getattr(self, "_v41_tree_seq", 0) + 1; self._v41_tree_seq = seq
-        style_name = f"QATree{seq}.Treeview"
-        self.tree_registry[tree]["style_name"] = style_name
-        self.tree_registry[tree]["disabled_iids"] = set()
-        tree.configure(style=style_name)
-        original_insert = tree.insert
-        def insert_and_resize(*args, **kwargs):
-            iid = original_insert(*args, **kwargs)
-            try: self.after_idle(lambda t=tree: self._refresh_tree_height(t))
-            except Exception: pass
-            return iid
-        tree.insert = insert_and_resize  # type: ignore[method-assign]
-        return tree
-
-    def _tree_context_menu(self, tree: ttk.Treeview, event):
-        region = tree.identify_region(event.x, event.y)
-        col_id = tree.identify_column(event.x); columns = tree["columns"]
-        idx = int(col_id[1:]) - 1 if col_id.startswith("#") else -1
-        col = columns[idx] if 0 <= idx < len(columns) else None
-        menu = tk.Menu(self, tearoff=False)
-        if region == "heading" and col:
-            visible = tree.column(col, "width") > 0
-            menu.add_command(label=("隐藏列：" if visible else "显示列：") + str(tree.heading(col, "text")),
-                             command=lambda: self._set_column_visible(tree, col, not visible))
-            menu.add_separator()
-            menu.add_command(label="显示全部列", command=lambda: self._set_all_columns(tree, True))
-            menu.add_command(label="恢复本页默认列", command=lambda: self._restore_page_columns(self.tree_registry[tree]["page"]))
-            menu.add_separator()
-            menu.add_command(label="筛选当前列…", command=lambda: self._filter_tree_column(tree, col))
-            menu.add_command(label="清除表格筛选", command=lambda: self._clear_tree_filter(tree))
-        else:
-            iid = tree.identify_row(event.y)
-            if iid:
-                tree.selection_set(iid)
-                if col: menu.add_command(label="复制当前单元格", command=lambda: self._copy_tree_cell(tree, iid, col))
-                menu.add_command(label="复制选中行", command=lambda: self._copy_tree_selection(tree))
-        if menu.index("end") is not None: menu.tk_popup(event.x_root, event.y_root)
-
-    def _filter_tree_column(self, tree: ttk.Treeview, col):
-        # One active filter at a time, as in v4, but finite-option columns now
-        # use a checkbox list instead of textual contains matching.
-        self._clear_tree_filter(tree)
-        all_iids = list(tree.get_children(""))
-        self.tree_registry[tree]["filter_order"] = list(all_iids)
-        values = sorted({str(tree.set(iid, col)) for iid in all_iids}, key=lambda x: x.casefold())
-        finite = (col in FIXED_FILTER_COLUMNS or
-                  (col not in TEXT_FILTER_COLUMNS and 0 < len(values) <= 16 and max((len(v) for v in values), default=0) <= 45))
-        meta = self.tree_registry[tree]
-        detached: list[str] = []
-        if finite:
-            dlg = MultiChoiceFilterDialog(self, f"筛选：{tree.heading(col, 'text')}", values)
-            self.wait_window(dlg)
-            if dlg.result is None: return
-            selected = dlg.result
-            for iid in all_iids:
-                if str(tree.set(iid, col)) not in selected:
-                    tree.detach(iid); detached.append(iid)
-        else:
-            value = simpledialog.askstring("筛选当前列", "只显示包含以下文字的行；留空表示清除筛选：", parent=self)
-            if value is None or not value: return
-            needle = value.casefold()
-            for iid in all_iids:
-                if needle not in str(tree.set(iid, col)).casefold():
-                    tree.detach(iid); detached.append(iid)
-        meta["detached"] = detached
-        self._refresh_tree_height(tree)
-
-    def _clear_tree_filter(self, tree):
-        meta = self.tree_registry.get(tree, {})
-        order = list(meta.get("filter_order", []))
-        super()._clear_tree_filter(tree)
-        # Rebuild the exact pre-filter order (which may itself be a sorted order).
-        for index, iid in enumerate(order):
-            try:
-                tree.move(iid, "", index)
-            except Exception:
-                pass
-        meta["filter_order"] = []
-        self._refresh_tree_height(tree)
-
-    def _check_all(self, tree, checked=True, predicate=None):
-        # get_children("") returns attached/visible rows only. Detached rows from
-        # a filter are deliberately untouched.
-        disabled = self.tree_registry.get(tree, {}).get("disabled_iids", set())
-        for iid in tree.get_children(""):
-            if iid in disabled: continue
-            vals = list(tree.item(iid, "values"))
-            if not vals: continue
-            if predicate is None or predicate(iid, vals):
-                vals[0] = "☑" if checked else "☐"; tree.item(iid, values=vals)
-
-    def _checked_iids(self, tree):
-        disabled = self.tree_registry.get(tree, {}).get("disabled_iids", set())
-        return [iid for iid in tree.get_children("") if iid not in disabled and tree.item(iid, "values") and tree.item(iid, "values")[0] == "☑"]
-
-    def _toggle_tree_checkbox(self, tree, event):
-        iid = tree.identify_row(event.y)
-        if iid in self.tree_registry.get(tree, {}).get("disabled_iids", set()): return "break"
-        return super()._toggle_tree_checkbox(tree, event)
-
-    def _display(self, text: str, limit: int = 420) -> str:
-        value = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-        if self.display_line_mode.get() == "显示分行":
-            lines = value.split("\n")
-            if len(lines) > 5:
-                value = "\n".join(lines[:5]) + f"\n↕ 还有 {len(lines)-5} 行"
-            if limit is not None and len(value) > limit:
-                value = value[:max(0, limit - 1)] + "…"
-            return value
-        value = value.replace("\n", " ↵ ")
-        if limit is not None and len(value) > limit: value = value[:max(0, limit - 1)] + "…"
-        return value
-
-    def _apply_font(self):
-        text_family = self.display_font.get() if hasattr(self, "display_font") else "系统默认"
-        if text_family == "系统默认": text_family = tkfont.nametofont("TkTextFont").actual("family")
-        list_family = self.list_font.get() if hasattr(self, "list_font") else "系统默认"
-        if list_family == "系统默认": list_family = tkfont.nametofont("TkDefaultFont").actual("family")
-        text_size = max(6, int(self.text_font_size.get() or 11)) if hasattr(self, "text_font_size") else 11
-        list_size = max(6, int(self.list_font_size.get() or 10)) if hasattr(self, "list_font_size") else 10
-        for widget in getattr(self, "text_widgets", []):
-            try: widget.configure(font=(text_family, text_size))
-            except Exception: pass
-        if hasattr(self, "style"):
-            self.style.configure("Treeview.Heading", font=(list_family, list_size, "bold"))
-            for tree, meta in getattr(self, "tree_registry", {}).items():
-                style_name = meta.get("style_name", "Treeview")
-                self.style.configure(style_name, font=(list_family, list_size))
-                self._refresh_tree_height(tree)
-        try: self._draw_width_preview()
-        except Exception: pass
-
-    def _refresh_tree_height(self, tree):
-        if not hasattr(self, "display_line_mode") or not hasattr(self, "style"): return
-        meta = self.tree_registry.get(tree, {}); style_name = meta.get("style_name", "Treeview")
-        size = max(6, int(self.list_font_size.get() or 10)) if hasattr(self, "list_font_size") else 10
-        if self.display_line_mode.get() != "显示分行":
-            self.style.configure(style_name, rowheight=max(25, size + 14)); return
-        max_lines = 1
-        for iid in tree.get_children(""):
-            vals = tree.item(iid, "values")
-            if vals:
-                max_lines = max(max_lines, max(str(v).count("\n") + 1 for v in vals))
-        units = min(max_lines, 5)
-        if max_lines > 5: units += 0.5
-        line_px = max(16, size + 8)
-        self.style.configure(style_name, rowheight=max(28, int(math.ceil(line_px * units + 6))))
-
-    def _toggle_line_mode(self):
-        multiline = self.display_line_mode.get() == "显示分行"
-        for tree in self.tree_registry:
-            for iid in tree.get_children(""):
-                vals = list(tree.item(iid, "values"))
-                vals = [str(v).replace(" ↵ ", "\n") if multiline else str(v).replace("\n", " ↵ ") for v in vals]
-                tree.item(iid, values=vals)
-            self._refresh_tree_height(tree)
-        self._apply_font()
+    def _do_width(self):
+        try:
+            records = self.active_records()
+            unit_issues = analyze_width(records, self.face_limit.get(), self.narr_limit.get(), self.check_face.get(), self.check_narr.get(), self.ambiguous_unit.get())
+            found: dict[tuple[str, int], SimpleNamespace] = {}
+            for x in unit_issues:
+                found[(x.record.uid, x.line_no)] = SimpleNamespace(record=x.record, line_no=x.line_no, face_type=x.face_type,
+                                                                   units=x.width, limit=x.limit, pixels="", reason="全角单位超线")
+            font = self._font_object(); ref_char = "汉"
+            if self.check_font_pixels.get():
+                for r in records:
+                    if r.marker != "Message": continue
+                    if is_face_message(r):
+                        if not self.check_face.get(): continue
+                        limit, typ = self.face_limit.get(), "有头像"
+                    elif is_narration_message(r):
+                        if not self.check_narr.get(): continue
+                        limit, typ = self.narr_limit.get(), "无头像"
+                    else: continue
+                    ref_pixels = font.measure(ref_char * max(1, int(limit))) + font.measure(ref_char) * (limit % 1)
+                    for n, line in enumerate(normalize_newlines(r.translated).split("\n"), 1):
+                        vis = render_rm2k3_controls(line, runtime_placeholders=False)
+                        pixels = font.measure(vis)
+                        if pixels > ref_pixels:
+                            key = (r.uid, n)
+                            units = logical_fullwidth_units(vis, self.ambiguous_unit.get())
+                            if key in found:
+                                found[key].pixels = f"{pixels:.0f}"; found[key].reason = "全角单位＋当前字体像素超线"
+                            else:
+                                found[key] = SimpleNamespace(record=r, line_no=n, face_type=typ, units=units, limit=limit,
+                                                             pixels=f"{pixels:.0f}", reason="当前字体像素超线")
+            self.result_maps["width"] = {}; self._clear_tree(self.width_tree)
+            for i, x in enumerate(found.values()):
+                iid=f"w{i}"; self.result_maps["width"][iid]=x.record
+                self.width_tree.insert("", "end", iid=iid, values=(x.face_type, x.record.file_key, x.line_no, f"{x.units:g}", x.pixels,
+                    f"{x.limit:g}", x.reason, self._display(x.record.original), self._display(x.record.translated)))
+            self.width_font_label.set(f"当前字体：{font.actual('family')} {font.actual('size')} pt")
+            self.status_var.set(f"发现 {len(found)} 条宽度警告。Ambiguous字符按 {self.ambiguous_unit.get():g} 全角单位计算。")
+            self._draw_width_preview(); self._refresh_all_rulers()
+        except Exception as exc:
+            messagebox.showerror("分析失败", str(exc), parent=self)
 
     # ------------------------------------------------------------------
-    # Editor: RM2k/2k3 operator reference and rendered hidden mode
+    # Single editor: adjustable same-height layout + rulers
     # ------------------------------------------------------------------
     def _build_editor(self):
         super()._build_editor()
         tab = self.tabs["editor"]
-        extra = ttk.Frame(tab); extra.grid(row=5, column=0, sticky="ew", pady=(2, 0))
-        ttk.Button(extra, text="RPG Maker 2000/2003 操作符一览", command=self._open_control_reference).pack(side="left")
-        ttk.Button(extra, text="打开中文操作符文档", command=lambda: open_file(self.control_doc_path)).pack(side="left", padx=5)
-        ttk.Label(extra, text="双击操作符可插入到译文光标位置；隐藏操作符时会显示可静态呈现的特殊符号。", foreground="#555").pack(side="left", padx=10)
+        self.editor_text_height = tk.IntVar(value=6)
+        self.editor_preview_height = tk.IntVar(value=190)
+        self.editor_show_texts = tk.BooleanVar(value=True)
+        self.editor_show_preview = tk.BooleanVar(value=True)
+        self.editor_text_pane = self.editor_original.master.master
+        self.editor_preview_frame = self.editor_width_canvas.master
+        self.editor_original_ruler = self._install_text_ruler(self.editor_original)
+        self.editor_translation_ruler = self._install_text_ruler(self.editor_translation)
+        self.editor_layout_ctl = ttk.LabelFrame(tab, text="文本处理框架高度", padding=4)
+        ctl = self.editor_layout_ctl
+        ctl.grid(row=7, column=0, sticky="ew", pady=(4,0))
+        ttk.Label(ctl,text="原/译文框高：").pack(side="left")
+        ttk.Spinbox(ctl,from_=3,to=18,textvariable=self.editor_text_height,width=5,command=self._apply_editor_layout).pack(side="left")
+        ttk.Label(ctl,text="预览高：").pack(side="left",padx=(8,2))
+        ttk.Spinbox(ctl,from_=100,to=700,increment=20,textvariable=self.editor_preview_height,width=6,command=self._apply_editor_layout).pack(side="left")
+        ttk.Checkbutton(ctl,text="显示原文/译文部分",variable=self.editor_show_texts,command=self._apply_editor_layout).pack(side="left",padx=8)
+        ttk.Checkbutton(ctl,text="显示当前字体预览",variable=self.editor_show_preview,command=self._apply_editor_layout).pack(side="left")
+        ttk.Button(ctl,text="应用高度",command=self._apply_editor_layout).pack(side="right")
+        self._apply_editor_layout()
+        self._install_editor_vertical_layout()
 
-    def _toggle_editor_controls(self):
-        if not self.current_record: return
-        if not self.editor_controls_hidden:
-            self.editor_raw_translation = self.editor_translation.get("1.0", "end-1c")
-            self._set_text(self.editor_original, render_rm2k3_controls(self.editor_raw_original), True)
-            self._set_text(self.editor_translation, render_rm2k3_controls(self.editor_raw_translation), True)
-            self.editor_controls_hidden = True; self.editor_control_button.configure(text="显示 RPG Maker 通配符/操作符")
+    def _apply_editor_layout(self):
+        try:
+            h=max(3,int(self.editor_text_height.get())); ph=max(90,int(self.editor_preview_height.get()))
+            self.editor_original.configure(height=h); self.editor_translation.configure(height=h); self.editor_width_canvas.configure(height=ph)
+            if self.editor_show_texts.get(): self.editor_text_pane.grid()
+            else: self.editor_text_pane.grid_remove()
+            if self.editor_show_preview.get(): self.editor_preview_frame.grid()
+            else: self.editor_preview_frame.grid_remove()
+            self._refresh_all_rulers(); self._draw_editor_width()
+            if hasattr(self,"editor_sash_top"): self._sync_editor_grid_sizes()
+        except Exception: pass
+
+    # ------------------------------------------------------------------
+    # Missing translation: reusable exclusion list
+    # ------------------------------------------------------------------
+    def _build_missing(self):
+        super()._build_missing()
+        tab=self.tabs["missing"]
+        extra=ttk.Frame(tab); extra.grid(row=2,column=0,sticky="ew",pady=(4,0))
+        ttk.Button(extra,text="将勾选项标记为“不算缺译”",command=self._missing_add_exclusions).pack(side="left")
+        ttk.Button(extra,text="导入“不算缺译”文本…",command=self._missing_import_exclusions).pack(side="left",padx=4)
+        ttk.Button(extra,text="导出“不算缺译”文本…",command=self._missing_export_exclusions).pack(side="left")
+        ttk.Button(extra,text="清空排除表",command=self._missing_clear_exclusions).pack(side="left",padx=4)
+        self.missing_exclusion_label=tk.StringVar(value="不算缺译：0 条")
+        ttk.Label(extra,textvariable=self.missing_exclusion_label,foreground="#555").pack(side="left",padx=10)
+
+    def _do_missing(self):
+        try:
+            selected={k for k,v in self.missing_type_vars.items() if v.get()}
+            issues=[x for x in analyze_missing_translations(self.active_records(),selected) if x.record.original not in self.missing_exclusions]
+            self._clear_tree(self.missing_tree); self.result_maps["missing"]={}
+            for i,x in enumerate(issues):
+                iid=f"miss{i}"; self.result_maps["missing"][iid]=x.record
+                self.missing_tree.insert("","end",iid=iid,values=("☐",x.record.file_key,x.text_kind,x.record.marker,x.reason,
+                    self._display(x.record.original),self._display(x.record.translated)))
+            self.status_var.set(f"疑似日文未翻译：{len(issues)} 条；已排除“不算缺译” {len(self.missing_exclusions)} 个原文。")
+        except Exception as exc: messagebox.showerror("缺译检查失败",str(exc),parent=self)
+
+    def _missing_add_exclusions(self):
+        added=0
+        for iid in self._checked_iids(self.missing_tree):
+            rec=self.result_maps.get("missing",{}).get(iid)
+            if isinstance(rec,DataRecord) and rec.original not in self.missing_exclusions:
+                self.missing_exclusions.add(rec.original); added+=1
+        self.missing_exclusion_label.set(f"不算缺译：{len(self.missing_exclusions)} 条"); self._do_missing()
+        self.status_var.set(f"新增 {added} 条“不算缺译”文本。")
+
+    def _missing_import_exclusions(self):
+        p=filedialog.askopenfilename(parent=self,filetypes=[("文本表","*.xlsx *.xlsm *.csv *.txt")])
+        if not p:return
+        try:
+            values=self._read_first_column(Path(p)); before=len(self.missing_exclusions); self.missing_exclusions.update(x for x in values if x)
+            self.missing_exclusion_label.set(f"不算缺译：{len(self.missing_exclusions)} 条")
+            self.status_var.set(f"导入 {len(self.missing_exclusions)-before} 条“不算缺译”文本。")
+        except Exception as exc: messagebox.showerror("导入失败",str(exc),parent=self)
+
+    def _missing_export_exclusions(self):
+        if not self.missing_exclusions:return
+        p=filedialog.asksaveasfilename(parent=self,defaultextension=".xlsx",filetypes=[("Excel","*.xlsx"),("CSV","*.csv"),("TXT","*.txt")])
+        if not p:return
+        path=Path(p); values=sorted(self.missing_exclusions)
+        if path.suffix.lower()==".csv":
+            with path.open("w",encoding="utf-8-sig",newline="") as f:
+                w=csv.writer(f);w.writerow(["不算缺译的原文"]);w.writerows([[x] for x in values])
+        elif path.suffix.lower()==".txt":
+            path.write_text("\n".join(values),encoding="utf-8-sig")
         else:
-            self._set_text(self.editor_original, self.editor_raw_original, True)
-            self._set_text(self.editor_translation, self.editor_raw_translation, False)
-            self.editor_controls_hidden = False; self.editor_control_button.configure(text="隐藏 RPG Maker 通配符/操作符")
+            wb=Workbook();ws=wb.active;ws.title="NotMissing";ws.append(["不算缺译的原文"])
+            for x in values:ws.append([x])
+            wb.save(path);wb.close()
+        messagebox.showinfo("导出完成",str(path),parent=self)
 
-    def _load_control_catalog(self):
-        try: return json.loads(self.control_catalog_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            messagebox.showerror("操作符一览", f"无法读取：{self.control_catalog_path}\n{exc}", parent=self); return []
+    def _missing_clear_exclusions(self):
+        if self.missing_exclusions and messagebox.askyesno("清空排除表","确定清空所有“不算缺译”文本？",parent=self):
+            self.missing_exclusions.clear();self.missing_exclusion_label.set("不算缺译：0 条");self._do_missing()
 
-    def _control_usage_count(self, item: dict) -> int:
-        if not self.current_record: return 0
-        text = self.current_record.original + "\n" + self.editor_translation.get("1.0", "end-1c")
-        try: return len(re.findall(item.get("regex", re.escape(item.get("insert", ""))), text, re.I))
-        except re.error: return text.count(item.get("insert", ""))
-
-    def _open_control_reference(self):
-        rows = self._load_control_catalog()
-        top = tk.Toplevel(self); top.title("RPG Maker 2000/2003 操作符一览"); top.geometry("1080x720")
-        ttk.Label(top, text="以下默认表仅收录 RPG Maker 2000/2003 的消息控制符与 $A-$z 特殊符号。双击一行插入“插入形式”。", foreground="#444").pack(anchor="w", padx=8, pady=6)
-        tree = ttk.Treeview(top, columns=("code", "insert", "meaning", "effect", "used"), show="headings")
-        for c, title, width in [("code","操作符",150),("insert","插入形式",150),("meaning","作用",280),("effect","显示/运行效果",360),("used","当前文本使用",100)]:
-            tree.heading(c, text=title); tree.column(c, width=width, anchor="w")
-        y = ttk.Scrollbar(top, orient="vertical", command=tree.yview); tree.configure(yscrollcommand=y.set)
-        tree.pack(side="left", fill="both", expand=True, padx=(8,0), pady=(0,8)); y.pack(side="right", fill="y", padx=(0,8), pady=(0,8))
-        by_iid = {}
-        for i, item in enumerate(rows):
-            iid=f"op{i}"; by_iid[iid]=item
-            tree.insert("", "end", iid=iid, values=(item.get("code",""), item.get("insert",""), item.get("meaning",""), item.get("effect",""), self._control_usage_count(item)))
-        def insert_op(_e=None):
-            sel=tree.selection()
-            if not sel:return
-            if self.editor_controls_hidden:
-                messagebox.showinfo("插入操作符", "请先在单独文本处理页显示操作符，再插入。", parent=top); return
-            value=str(by_iid[sel[0]].get("insert", ""))
-            if value:
-                self.editor_translation.insert("insert", value); self.editor_translation.focus_set()
-        tree.bind("<Double-1>", insert_op)
+    @staticmethod
+    def _read_first_column(path:Path):
+        if path.suffix.lower()==".txt":return [x.rstrip("\r\n") for x in path.read_text(encoding="utf-8-sig").splitlines() if x.strip()]
+        if path.suffix.lower()==".csv":
+            with path.open("r",encoding="utf-8-sig",newline="") as f: rows=list(csv.reader(f))
+        else:
+            wb=load_workbook(path,read_only=True,data_only=False)
+            try: rows=[list(x) for x in wb[wb.sheetnames[0]].iter_rows(values_only=True)]
+            finally:wb.close()
+        if not rows:return []
+        start=1 if str(rows[0][0] or "").strip() in {"不算缺译的原文","原文","Original"} else 0
+        return [str(r[0] or "") for r in rows[start:] if r and str(r[0] or "").strip()]
 
     # ------------------------------------------------------------------
-    # Quote analysis: one row per record with separate situation/style columns
-    # ------------------------------------------------------------------
-    def _build_quote_panel(self):
-        tab = self.punct_tabs["quote"]; tab.rowconfigure(2, weight=1); tab.columnconfigure(0, weight=1)
-        bar = ttk.Frame(tab); bar.grid(row=0, column=0, sticky="ew")
-        ttk.Button(bar, text="提取全部含引号文本", command=self._do_quote_analysis).pack(side="left")
-        ttk.Label(bar, text="引号状况处理：").pack(side="left", padx=(12,2))
-        self.quote_form=tk.StringVar(value="与原文一致")
-        ttk.Combobox(bar,textvariable=self.quote_form,state="readonly",values=["与原文一致","左右引号","只有左引号","删除引号"],width=12).pack(side="left")
-        ttk.Label(bar,text="引号样式：").pack(side="left",padx=(8,2)); self.quote_style=tk.StringVar(value="与原文相同")
-        ttk.Combobox(bar,textvariable=self.quote_style,state="readonly",values=["与原文相同"]+QUOTE_STYLE_LABELS,width=12).pack(side="left")
-        ttk.Button(bar,text="生成处理预览",command=self._preview_quote_changes).pack(side="left",padx=5)
-        ttk.Button(bar,text="应用勾选",command=self._apply_quote_changes).pack(side="right")
-        act=ttk.Frame(tab); act.grid(row=1,column=0,sticky="ew",pady=4)
-        ttk.Button(act,text="全选可批量项",command=lambda:self._check_all(self.quote_tree,True)).pack(side="left")
-        ttk.Button(act,text="全部取消",command=lambda:self._check_all(self.quote_tree,False)).pack(side="left",padx=4)
-        ttk.Button(act,text="只选状况不符",command=lambda:self._quote_select_mismatch("situation")).pack(side="left")
-        ttk.Button(act,text="只选样式不符",command=lambda:self._quote_select_mismatch("style")).pack(side="left",padx=4)
-        self.quote_tree=self._tree(tab,
-            ("use","file","situation","situation_match","style","style_match","batch","original","translated","proposed"),
-            ("选择","文件","引号状况","状况与原文相符","引号样式","样式与原文相符","批量处理能力","原文","译文","处理结果"),
-            (60,200,360,120,300,120,180,400,400,400),checkbox=True)
-        self.quote_tree.master.grid(row=2,column=0,sticky="nsew"); self.quote_tree.bind("<Double-1>",lambda e:self._double_to_editor("quote"))
-        self.quote_rows: dict[str, CombinedQuoteAnalysisRow] = {}
-
-    def _do_quote_analysis(self):
-        try:
-            rows=analyze_quote_combined(self.active_records()); self.quote_rows={}; self.result_maps["quote"]={}; self._clear_tree(self.quote_tree)
-            disabled=set()
-            for i,row in enumerate(rows):
-                iid=f"q{i}"; self.quote_rows[iid]=row; self.result_maps["quote"][iid]=row.record
-                batch=("状况可；" if row.situation_auto else "状况手动；")+("样式可" if row.style_auto else "样式手动")
-                if not row.situation_auto and not row.style_auto: disabled.add(iid)
-                self.quote_tree.insert("","end",iid=iid,values=("☐",row.record.file_key,row.situation,row.situation_match,row.style,row.style_match,batch,
-                    self._display(row.record.original),self._display(row.record.translated),""))
-            self.tree_registry[self.quote_tree]["disabled_iids"]=disabled
-            self.status_var.set(f"提取 {len(rows)} 条含引号 Message；状况和样式已拆分为独立列。")
-        except Exception as exc: messagebox.showerror("引号检查失败",str(exc),parent=self)
-
-    def _quote_select_mismatch(self, which: str):
-        for iid in self.quote_tree.get_children(""):
-            row=self.quote_rows.get(iid); vals=list(self.quote_tree.item(iid,"values"))
-            if not row:continue
-            ok=(row.situation_match=="否" and row.situation_auto) if which=="situation" else (row.style_match=="否" and row.style_auto)
-            vals[0]="☑" if ok else "☐"; self.quote_tree.item(iid,values=vals)
-
-    def _preview_quote_changes(self):
-        if not self.quote_rows:self._do_quote_analysis()
-        for iid,row in list(self.quote_rows.items()):
-            text=row.record.translated; changed=False
-            temp=row.record
-            if row.situation_auto:
-                pair=None
-                if self.quote_style.get()=="与原文相同" and len(row.source_styles)==1: pair=QUOTE_PAIRS[row.source_styles[0]]
-                elif self.quote_style.get() in QUOTE_PAIRS: pair=QUOTE_PAIRS[self.quote_style.get()]
-                form=self.quote_form.get()
-                if form=="与原文一致":
-                    info=_outer_quote_info(row.record.original); form="左右引号" if info.get("close_at_end") else "只有左引号"
-                proposal=build_quote_situation_proposal(temp,form,pair)
-                if proposal is not None: text=proposal; changed=changed or text!=temp.translated; temp=dataclass_replace(temp,translated=text)
-            if row.style_auto:
-                pair=None
-                if self.quote_style.get()=="与原文相同" and len(row.source_styles)==1: pair=QUOTE_PAIRS[row.source_styles[0]]
-                elif self.quote_style.get() in QUOTE_PAIRS: pair=QUOTE_PAIRS[self.quote_style.get()]
-                if pair is not None:
-                    text2=build_quote_style_proposal(temp,pair); changed=changed or text2!=text; text=text2
-            proposal=text if changed else None
-            self.quote_rows[iid]=dataclass_replace(row,proposal=proposal)
-            vals=list(self.quote_tree.item(iid,"values")); vals[-1]=self._display(proposal or ""); self.quote_tree.item(iid,values=vals)
-
-    def _apply_quote_changes(self):
-        updates={}
-        for iid in self._checked_iids(self.quote_tree):
-            row=self.quote_rows.get(iid)
-            if row and row.proposal is not None and row.proposal!=row.record.translated: updates[row.record.uid]=(row.record,row.proposal)
-        self._apply_updates_dialog(updates,"引号处理")
-
-    # ------------------------------------------------------------------
-    # Ellipsis UI with clarified conversion language
-    # ------------------------------------------------------------------
-    def _build_ellipsis_panel(self):
-        tab=self.punct_tabs["ellipsis"]; tab.rowconfigure(3,weight=1); tab.columnconfigure(0,weight=1)
-        scan=ttk.Frame(tab); scan.grid(row=0,column=0,sticky="ew")
-        self.ellipsis_side=tk.StringVar(value="both"); self.ellipsis_kind=tk.StringVar(value="全部")
-        ttk.Label(scan,text="检查：").pack(side="left"); ttk.Combobox(scan,textvariable=self.ellipsis_side,state="readonly",values=["original","translated","both"],width=11).pack(side="left")
-        ttk.Combobox(scan,textvariable=self.ellipsis_kind,state="readonly",values=["全部","连续点","省略号"],width=9).pack(side="left",padx=4)
-        ttk.Button(scan,text="分类检查",command=self._do_ellipsis_scan).pack(side="left")
-        ttk.Label(scan,text="连续点仅指至少两个连续的相同点；“…”始终属于省略号。",foreground="#555").pack(side="left",padx=12)
-        conv=ttk.LabelFrame(tab,text="转换",padding=4); conv.grid(row=1,column=0,sticky="ew",pady=4)
-        self.ellipsis_direction=tk.StringVar(value="连续点→省略号")
-        ttk.Combobox(conv,textvariable=self.ellipsis_direction,state="readonly",values=["连续点→省略号","省略号→连续点","省略号→省略号"],width=16).grid(row=0,column=0,padx=3)
-        ttk.Label(conv,text="连续点→省略号：每").grid(row=0,column=1); self.ellipsis_group_size=tk.IntVar(value=2)
-        ttk.Spinbox(conv,from_=1,to=12,textvariable=self.ellipsis_group_size,width=4).grid(row=0,column=2); ttk.Label(conv,text="点对应一个省略号，多余点").grid(row=0,column=3)
-        self.ellipsis_remainder=tk.StringVar(value="删除"); ttk.Combobox(conv,textvariable=self.ellipsis_remainder,state="readonly",values=["删除","一个省略号"],width=10).grid(row=0,column=4,padx=3)
-        ttk.Label(conv,text="需要转换的省略号为：").grid(row=0,column=5); self.ellipsis_unit_style=tk.StringVar(value="双省略号")
-        ttk.Combobox(conv,textvariable=self.ellipsis_unit_style,state="readonly",values=["单省略号","双省略号"],width=10).grid(row=0,column=6)
-        ttk.Label(conv,text="省略号→连续点：每一个省略号对应").grid(row=1,column=1,pady=3); self.ellipsis_dots_per=tk.IntVar(value=3)
-        ttk.Spinbox(conv,from_=1,to=12,textvariable=self.ellipsis_dots_per,width=4).grid(row=1,column=2); ttk.Label(conv,text="点，点符号").grid(row=1,column=3)
-        self.ellipsis_dot_style=tk.StringVar(value="."); ttk.Combobox(conv,textvariable=self.ellipsis_dot_style,state="readonly",values=[".","．","·","・","。"],width=5).grid(row=1,column=4)
-        ttk.Label(conv,text="省略号→省略号：统一为").grid(row=1,column=5); self.ellipsis_target_style=tk.StringVar(value="双省略号")
-        ttk.Combobox(conv,textvariable=self.ellipsis_target_style,state="readonly",values=["单省略号","双省略号"],width=10).grid(row=1,column=6)
-        self.ellipsis_source_vars={ch:tk.BooleanVar(value=True) for ch in [".","．","·","・","。"]}
-        pf=ttk.Frame(conv); pf.grid(row=2,column=1,columnspan=6,sticky="w")
-        ttk.Label(pf,text="允许转换的连续点：").pack(side="left")
-        for ch,var in self.ellipsis_source_vars.items():ttk.Checkbutton(pf,text=ch,variable=var).pack(side="left")
-        ttk.Button(pf,text="预览勾选转换",command=self._preview_ellipsis).pack(side="left",padx=8)
-        ttk.Button(pf,text="应用勾选",command=lambda:self._apply_generic_changes("ellipsis_v4")).pack(side="left")
-        act=ttk.Frame(tab); act.grid(row=2,column=0,sticky="ew")
-        ttk.Button(act,text="全选可处理项",command=lambda:self._check_all(self.ellipsis_tree,True)).pack(side="left")
-        ttk.Button(act,text="全不选",command=lambda:self._check_all(self.ellipsis_tree,False)).pack(side="left",padx=4)
-        self.ellipsis_tree=self._tree(tab,("use","side","kind","style","count","control","file","manual","reason","original","translated","proposed"),
-            ("选择","文本侧","类型","形式","数量","夹操作符","文件","仅手动","说明","原文","译文","处理结果"),
-            (60,70,90,100,60,80,200,80,250,340,340,340),checkbox=True)
-        self.ellipsis_tree.master.grid(row=3,column=0,sticky="nsew"); self.ellipsis_tree.bind("<Double-1>",lambda e:self._double_to_editor("ellipsis_v4"))
-        self.ellipsis_occurrences={}
-
-    def _do_ellipsis_scan(self):
-        try:
-            rows=analyze_ellipsis_occurrences(self.active_records(),self.ellipsis_side.get())
-            if self.ellipsis_kind.get()!="全部":rows=[x for x in rows if x.kind==self.ellipsis_kind.get()]
-            self.ellipsis_occurrences={};self.result_maps["ellipsis_v4"]={};self._clear_tree(self.ellipsis_tree);disabled=set()
-            for i,row in enumerate(rows):
-                iid=f"el{i}";self.ellipsis_occurrences[iid]=row;self.result_maps["ellipsis_v4"][iid]=row.record
-                if row.manual_only or row.side!="译文":disabled.add(iid)
-                self.ellipsis_tree.insert("","end",iid=iid,values=("☐",row.side,row.kind,row.visible_style,row.count,"是" if row.interrupted_by_control else "否",row.record.file_key,
-                    "是" if row.manual_only else "否",row.reason,self._display(row.record.original),self._display(row.record.translated),""))
-            self.tree_registry[self.ellipsis_tree]["disabled_iids"]=disabled
-            self.status_var.set(f"省略号/连续点共 {len(rows)} 项；单个点不会列入连续点。")
-        except Exception as exc:messagebox.showerror("省略号检查失败",str(exc),parent=self)
-
-    def _preview_ellipsis(self):
-        records={}
-        for iid in self._checked_iids(self.ellipsis_tree):
-            occ=self.ellipsis_occurrences.get(iid)
-            if occ and not occ.manual_only and occ.side=="译文":records[occ.record.uid]=occ.record
-        changes=[]; style="…" if self.ellipsis_unit_style.get()=="单省略号" else "……"; target_count=1 if self.ellipsis_target_style.get()=="单省略号" else 2
-        allowed={ch for ch,var in self.ellipsis_source_vars.items() if var.get()}
-        for record in records.values():
-            proposed=build_ellipsis_conversion(record,direction=self.ellipsis_direction.get(),source_chars=allowed,group_size=self.ellipsis_group_size.get(),
-                remainder=self.ellipsis_remainder.get(),ellipsis_style=style,dot_style=self.ellipsis_dot_style.get(),dots_per_ellipsis=self.ellipsis_dots_per.get(),target_ellipsis_count=target_count)
-            if proposed and proposed!=record.translated:changes.append(TextChange(record,self.ellipsis_direction.get(),proposed))
-        self.result_maps["ellipsis_v4_changes"]={x.record.uid:x for x in changes};self.result_maps["ellipsis_v4_apply"]={x.record.uid:x for x in changes}
-        for iid,occ in self.ellipsis_occurrences.items():
-            change=self.result_maps["ellipsis_v4_changes"].get(occ.record.uid);vals=list(self.ellipsis_tree.item(iid,"values"));vals[-1]=self._display(change.proposed) if change else "";self.ellipsis_tree.item(iid,values=vals)
-
-    # ------------------------------------------------------------------
-    # English case / character width: source-profile filters and match column
-    # ------------------------------------------------------------------
-    def _build_alnum_workspace(self):
-        tab=self.tabs["alnum"];tab.rowconfigure(0,weight=1);tab.columnconfigure(0,weight=1)
-        nb=ttk.Notebook(tab);nb.grid(row=0,column=0,sticky="nsew")
-        case_tab=ttk.Frame(nb,padding=6);width_tab=ttk.Frame(nb,padding=6);nb.add(case_tab,text="英文大小写");nb.add(width_tab,text="字符全半角")
-        self._build_case_panel(case_tab);self._build_width_char_panel(width_tab)
-
-    def _build_case_panel(self, tab):
-        tab.rowconfigure(2,weight=1);tab.columnconfigure(0,weight=1)
-        top=ttk.Frame(tab);top.grid(row=0,column=0,sticky="ew")
-        self.case_profile_filter=tk.StringVar(value="全部");self.case_query=tk.StringVar()
-        ttk.Label(top,text="查询范围：").pack(side="left");ttk.Combobox(top,textvariable=self.case_profile_filter,state="readonly",values=["全部","原文大写","原文小写","原文首字母大写","原文大小写混搭"],width=18).pack(side="left")
-        ttk.Label(top,text="仅处理包含：").pack(side="left",padx=(8,2));ttk.Entry(top,textvariable=self.case_query,width=24).pack(side="left")
-        ttk.Button(top,text="扫描",command=lambda:self._scan_alnum("case",False)).pack(side="left",padx=4);ttk.Button(top,text="查询与原文格式不相符",command=lambda:self._scan_alnum("case",True)).pack(side="left")
-        ttk.Button(top,text="全选",command=lambda:self._check_all(self.case_tree,True)).pack(side="left",padx=(8,2));ttk.Button(top,text="全不选",command=lambda:self._check_all(self.case_tree,False)).pack(side="left")
-        edit=ttk.LabelFrame(tab,text="修改框：有选区只处理选区；没有选区处理全文",padding=4);edit.grid(row=1,column=0,sticky="ew",pady=5);edit.columnconfigure(0,weight=1)
-        self.case_edit=tk.Text(edit,height=4,wrap="none");self.case_edit.grid(row=0,column=0,sticky="ew");self.text_widgets.append(self.case_edit)
-        self.case_tree=self._tree(tab,("use","file","found","source_profile","translated_profile","match","original","translated","proposed"),
-            ("选择","文件","匹配字符","原文大小写格式","译文大小写格式","与原文相符","原文","译文","处理结果"),(60,200,160,140,140,100,400,400,400),checkbox=True)
-        self.case_tree.master.grid(row=2,column=0,sticky="nsew");self.case_tree.bind("<Double-1>",lambda e:self._double_to_editor("case"));self.case_tree.bind("<<TreeviewSelect>>",lambda e:self._alnum_select_to_edit("case"))
-        bar=ttk.Frame(tab);bar.grid(row=3,column=0,sticky="ew",pady=4);self.case_mode=tk.StringVar(value="首字母大写")
-        ttk.Combobox(bar,textvariable=self.case_mode,state="readonly",values=["大写","小写","首字母大写"],width=12).pack(side="left")
-        ttk.Button(bar,text="处理修改框划取/全文",command=lambda:self._transform_alnum_edit("case",self.case_mode.get())).pack(side="left",padx=4)
-        ttk.Button(bar,text="修改框内容送入选中记录预览",command=lambda:self._alnum_edit_to_selected("case")).pack(side="left")
-        ttk.Button(bar,text="预览勾选记录",command=lambda:self._preview_alnum_records("case")).pack(side="left",padx=4);ttk.Button(bar,text="应用勾选",command=lambda:self._apply_generic_changes("case")).pack(side="right")
-
-    def _build_width_char_panel(self, tab):
-        tab.rowconfigure(2,weight=1);tab.columnconfigure(0,weight=1)
-        top=ttk.Frame(tab);top.grid(row=0,column=0,sticky="ew")
-        self.charwidth_target=tk.StringVar(value="both");self.charwidth_profile_filter=tk.StringVar(value="全部");self.charwidth_query=tk.StringVar()
-        ttk.Label(top,text="字符范围：").pack(side="left");ttk.Combobox(top,textvariable=self.charwidth_target,state="readonly",values=["english","digits","both"],width=10).pack(side="left")
-        ttk.Label(top,text="原文全半角：").pack(side="left",padx=(8,2));ttk.Combobox(top,textvariable=self.charwidth_profile_filter,state="readonly",values=["全部","原文半角","原文全角","原文混搭"],width=12).pack(side="left")
-        ttk.Label(top,text="仅处理包含：").pack(side="left",padx=(8,2));ttk.Entry(top,textvariable=self.charwidth_query,width=20).pack(side="left")
-        ttk.Button(top,text="扫描",command=lambda:self._scan_alnum("charwidth",False)).pack(side="left",padx=4);ttk.Button(top,text="查询与原文格式不相符",command=lambda:self._scan_alnum("charwidth",True)).pack(side="left")
-        ttk.Button(top,text="全选",command=lambda:self._check_all(self.charwidth_tree,True)).pack(side="left",padx=(8,2));ttk.Button(top,text="全不选",command=lambda:self._check_all(self.charwidth_tree,False)).pack(side="left")
-        edit=ttk.LabelFrame(tab,text="修改框：有选区只处理选区；没有选区处理全文",padding=4);edit.grid(row=1,column=0,sticky="ew",pady=5);edit.columnconfigure(0,weight=1)
-        self.charwidth_edit=tk.Text(edit,height=4,wrap="none");self.charwidth_edit.grid(row=0,column=0,sticky="ew");self.text_widgets.append(self.charwidth_edit)
-        self.charwidth_tree=self._tree(tab,("use","file","found","source_profile","translated_profile","match","original","translated","proposed"),
-            ("选择","文件","匹配字符","原文全半角格式","译文全半角格式","与原文相符","原文","译文","处理结果"),(60,200,160,140,140,100,400,400,400),checkbox=True)
-        self.charwidth_tree.master.grid(row=2,column=0,sticky="nsew");self.charwidth_tree.bind("<Double-1>",lambda e:self._double_to_editor("charwidth"));self.charwidth_tree.bind("<<TreeviewSelect>>",lambda e:self._alnum_select_to_edit("charwidth"))
-        bar=ttk.Frame(tab);bar.grid(row=3,column=0,sticky="ew",pady=4);self.english_width_mode=tk.StringVar(value="不变");self.digit_width_mode=tk.StringVar(value="不变")
-        ttk.Label(bar,text="英文：").pack(side="left");ttk.Combobox(bar,textvariable=self.english_width_mode,state="readonly",values=["不变","全角","半角"],width=8).pack(side="left")
-        ttk.Label(bar,text="数字：").pack(side="left",padx=(8,2));ttk.Combobox(bar,textvariable=self.digit_width_mode,state="readonly",values=["不变","全角","半角"],width=8).pack(side="left")
-        ttk.Button(bar,text="处理修改框划取/全文",command=self._transform_width_edit).pack(side="left",padx=4);ttk.Button(bar,text="修改框内容送入选中记录预览",command=lambda:self._alnum_edit_to_selected("charwidth")).pack(side="left")
-        ttk.Button(bar,text="预览勾选记录",command=lambda:self._preview_alnum_records("charwidth")).pack(side="left",padx=4);ttk.Button(bar,text="应用勾选",command=lambda:self._apply_generic_changes("charwidth")).pack(side="right")
-
-    def _scan_alnum(self, prefix, mismatch_only=False):
-        try:
-            target="english" if prefix=="case" else self.charwidth_target.get();rows=analyze_alnum_occurrences(self.active_records(),target)
-            query=getattr(self,prefix+"_query").get(); tree=getattr(self,prefix+"_tree");self._clear_tree(tree);self.result_maps[prefix]={};kept=[]
-            for row in rows:
-                rec=row.record
-                if query and query.casefold() not in row.reason.casefold():continue
-                if prefix=="case":
-                    sp=case_profile(rec.original);tp=case_profile(rec.translated).replace("原文","译文");match=case_format_matches(rec.original,rec.translated);flt=self.case_profile_filter.get()
-                else:
-                    sp=width_profile(rec.original,target);tp=width_profile(rec.translated,target).replace("原文","译文");match=width_format_matches(rec.original,rec.translated,target);flt=self.charwidth_profile_filter.get()
-                if flt!="全部" and sp!=flt:continue
-                if mismatch_only and match:continue
-                kept.append((row,sp,tp,match))
-            for i,(row,sp,tp,match) in enumerate(kept):
-                iid=f"{prefix}{i}";self.result_maps[prefix][iid]=row.record
-                tree.insert("","end",iid=iid,values=("☐",row.record.file_key,row.reason,sp,tp,"是" if match else "否",self._display(row.record.original),self._display(row.record.translated),""))
-            self.status_var.set(f"{prefix} 扫描命中 {len(kept)} 条。")
-        except Exception as exc:messagebox.showerror("扫描失败",str(exc),parent=self)
-
-    # ------------------------------------------------------------------
-    # Dictionary import: assign a whole-file category when category is absent
+    # Dictionary page: database names (items/monsters/skills) into dictionary
     # ------------------------------------------------------------------
     def _build_dictionary(self):
         super()._build_dictionary()
         tab=self.tabs["dictionary"]
-        bar=ttk.Frame(tab);bar.grid(row=3,column=0,sticky="ew",pady=(4,0))
-        ttk.Button(bar,text="全选当前可见行",command=lambda:self._select_visible_rows(self.dictionary_tree,True)).pack(side="left")
-        ttk.Button(bar,text="全不选",command=lambda:self._select_visible_rows(self.dictionary_tree,False)).pack(side="left",padx=4)
-        ttk.Label(bar,text="导入的辞典没有类别列时，会先询问整份辞典的默认类别。",foreground="#555").pack(side="left",padx=10)
+        extra=ttk.Frame(tab);extra.grid(row=3,column=0,sticky="ew",pady=(4,0))
+        ttk.Button(extra,text="从当前数据库导入道具/怪物/技能名称…",command=self._import_database_names_to_dictionary).pack(side="left")
+        ttk.Label(extra,text="只导入 Name，不导入 Description/UseMessage。类别：物品、怪物、技能。",foreground="#555").pack(side="left",padx=8)
+        search=ttk.Frame(tab);search.grid(row=4,column=0,sticky="ew",pady=(4,0))
+        self.dictionary_query=tk.StringVar()
+        ttk.Label(search,text="快速查询辞典：").pack(side="left")
+        ent=ttk.Entry(search,textvariable=self.dictionary_query,width=34);ent.pack(side="left",padx=3)
+        ttk.Button(search,text="查询",command=self._refresh_dictionary_tree).pack(side="left")
+        ttk.Button(search,text="清空",command=lambda:(self.dictionary_query.set(""),self._refresh_dictionary_tree())).pack(side="left",padx=3)
+        ttk.Label(search,text="匹配原文、译文、类别和来源；定位后仍可直接编辑。",foreground="#555").pack(side="left",padx=8)
+        ent.bind("<Return>",lambda e:self._refresh_dictionary_tree())
+        # Extend category combobox if we can locate it.
+        for widget in tab.winfo_children():
+            for child in widget.winfo_children():
+                if isinstance(child,ttk.Combobox):
+                    try:
+                        if str(child.cget("textvariable"))==str(self.dict_category):
+                            vals=list(child.cget("values"));
+                            for x in ["怪物","技能"]:
+                                if x not in vals:vals.append(x)
+                            child.configure(values=vals)
+                    except Exception:pass
 
-    def _select_visible_rows(self, tree, selected=True):
-        visible=list(tree.get_children(""))
-        if selected: tree.selection_set(visible)
-        else: tree.selection_remove(*visible)
+    def _import_database_names_to_dictionary(self):
+        dlg=tk.Toplevel(self);dlg.title("导入数据库名称到辞典");dlg.transient(self);dlg.resizable(False,False)
+        vals={"items":tk.BooleanVar(value=True),"monsters":tk.BooleanVar(value=True),"skills":tk.BooleanVar(value=True)}
+        ttk.Label(dlg,text="选择要导入的数据库名称（仅 Name）：").pack(anchor="w",padx=12,pady=(10,4))
+        ttk.Checkbutton(dlg,text="道具名 → 类别“物品”",variable=vals["items"]).pack(anchor="w",padx=20)
+        ttk.Checkbutton(dlg,text="怪物名 → 类别“怪物”",variable=vals["monsters"]).pack(anchor="w",padx=20)
+        ttk.Checkbutton(dlg,text="技能名 → 类别“技能”",variable=vals["skills"]).pack(anchor="w",padx=20)
+        def apply():
+            rows=extract_database_dictionary_rows(self.active_records(),vals["items"].get(),vals["monsters"].get(),vals["skills"].get())
+            self.dictionary_rows.extend(rows);self._refresh_dictionary_tree();dlg.destroy();self.status_var.set(f"已从数据库名称加入辞典 {len(rows)} 行。")
+        b=ttk.Frame(dlg);b.pack(fill="x",padx=10,pady=10);ttk.Button(b,text="导入",command=apply).pack(side="right");ttk.Button(b,text="取消",command=dlg.destroy).pack(side="right",padx=5)
 
-    def _dictionary_has_category(self, path: Path) -> bool:
-        if path.suffix.lower()==".csv":
-            raw=path.read_bytes()
-            for enc in ("utf-8-sig","utf-8","gb18030","cp932"):
-                try:text=raw.decode(enc);break
-                except UnicodeDecodeError:continue
-            else:text=raw.decode("utf-8",errors="replace")
-            row=next(csv.reader(text.splitlines()),[]);headers={str(x).strip().casefold() for x in row}
-        else:
-            wb=load_workbook(path,read_only=True,data_only=False);ws=wb.active;headers={str(c.value or "").strip().casefold() for c in next(ws.iter_rows(min_row=1,max_row=1))};wb.close()
-        return bool(headers & {"类别","category","type"})
+    # ------------------------------------------------------------------
+    # Dictionary warning/error-alias workflow v4.4
+    # ------------------------------------------------------------------
+    def _build_dictcheck(self):
+        super()._build_dictcheck()
+        tab=self.tabs["dictcheck"]
+        extra=ttk.Frame(tab);extra.grid(row=3,column=0,sticky="ew",pady=(4,0))
+        ttk.Button(extra,text="逐句识别：当前辞典条目",command=lambda:self._open_dictionary_review_v44("single")).pack(side="left")
+        ttk.Button(extra,text="逐句识别：辞典全部条目",command=lambda:self._open_dictionary_review_v44("all")).pack(side="left",padx=4)
+        ttk.Button(extra,text="导入错误译名表…",command=self._import_error_aliases).pack(side="left",padx=(12,4))
+        ttk.Button(extra,text="选择并导出错误译名…",command=self._export_error_aliases_v44).pack(side="left")
+        ttk.Label(extra,text="已确认错误译名会立即离开人工待确认队列；只有点击“重新检查”才重新进入。",foreground="#555").pack(side="left",padx=8)
 
-    def _load_dictionary_with_category(self, path: Path):
-        rows=load_editable_dictionary(path)
-        if self._dictionary_has_category(path):return rows
-        dlg=CategoryDialog(self,path.name);self.wait_window(dlg)
-        if dlg.result is None:raise QAError(f"已取消导入：{path.name}")
-        return [EditableDictionaryRow(r.original,r.translation,dlg.result,r.source or path.name) for r in rows]
+    def _selected_main_dictionary_warning(self):
+        sel=self.dictcheck_tree.selection() if hasattr(self,"dictcheck_tree") else ()
+        if not sel:return None
+        iid=sel[0]
+        if iid.startswith("dc"):
+            try:
+                idx=int(iid[2:]);return self.current_dict_warnings[idx] if 0<=idx<len(self.current_dict_warnings) else None
+            except Exception:return None
+        return None
 
-    def _import_dictionary(self):
-        paths=filedialog.askopenfilenames(parent=self,filetypes=[("辞典","*.xlsx *.xlsm *.csv")])
+    def _open_dictionary_review(self):
+        # Preserve old toolbar action as "all entries".
+        self._open_dictionary_review_v44("all")
+
+    def _open_dictionary_review_v44(self,mode="all"):
+        if not self.current_dict_warnings and not self.error_aliases:
+            messagebox.showinfo("辞典逐句确认","请先执行一次辞典匹配检查。",parent=self);return
+        selected=self._selected_main_dictionary_warning() if mode=="single" else None
+        if mode=="single" and selected is None:
+            messagebox.showinfo("当前辞典条目","请先在上方辞典匹配结果中选择一条记录。",parent=self);return
+        self.review_term_filter=selected.original_term if selected else None
+        self.review_force_show_alias_managed=False
+        self._mark_alias_managed_warnings()
+        win=tk.Toplevel(self);self.review_window=win
+        win.title("辞典匹配逐句确认 / 错误译名修正"+(f"｜仅：{self.review_term_filter}" if self.review_term_filter else "｜全部条目"));win.geometry("1550x900");win.transient(self)
+        pan=ttk.PanedWindow(win,orient="horizontal");pan.pack(fill="both",expand=True,padx=6,pady=6)
+        left=ttk.Frame(pan);right=ttk.Frame(pan);pan.add(left,weight=2);pan.add(right,weight=3)
+        left.rowconfigure(1,weight=1);left.columnconfigure(0,weight=1)
+        top=ttk.Frame(left);top.grid(row=0,column=0,sticky="ew")
+        ttk.Button(top,text="重新检查（让已处理项重新进入人工列表）",command=lambda:self._review_rescan_warnings_v44(win)).pack(side="left")
+        ttk.Button(top,text="跳过当前误命中",command=lambda:self._review_skip(win)).pack(side="left",padx=4)
+        old_page=self._current_tree_page;self._current_tree_page="dictcheck"
+        self.review_tree=self._tree(left,("status","term","expected","file"),("状态","辞典原词","正确译名","文件"),(150,220,220,280))
+        self.review_tree.master.grid(row=1,column=0,sticky="nsew");self.review_tree.bind("<<TreeviewSelect>>",lambda e:self._review_show_current())
+        self._current_tree_page=old_page
+
+        right.rowconfigure(1,weight=1);right.rowconfigure(3,weight=1);right.columnconfigure(0,weight=1)
+        ttk.Label(right,text="原文（可划选新辞典原词）").grid(row=0,column=0,sticky="w")
+        self.review_original=tk.Text(right,height=6,wrap="word");self.review_original.grid(row=1,column=0,sticky="nsew")
+        ttk.Label(right,text="译文（可划选错误译名；或划选新辞典译文）").grid(row=2,column=0,sticky="w")
+        self.review_translated=tk.Text(right,height=6,wrap="word");self.review_translated.grid(row=3,column=0,sticky="nsew")
+        actions=ttk.Frame(right);actions.grid(row=4,column=0,sticky="ew",pady=4)
+        ttk.Button(actions,text="将译文选区加入错误译名",command=lambda:self._review_add_error_alias_v44(win)).pack(side="left")
+        ttk.Button(actions,text="用原文/译文选区新增辞典项",command=lambda:self._review_add_dictionary_entry(win)).pack(side="left",padx=4)
+        ttk.Label(actions,text="加入错误译名后，所有可由该错误译名自动处理的句子会立刻从上方人工列表移除。",foreground="#555").pack(side="left",padx=8)
+
+        bottom=ttk.PanedWindow(win,orient="horizontal");bottom.pack(fill="both",expand=True,padx=6,pady=(0,6))
+        af=ttk.Frame(bottom);pf=ttk.Frame(bottom);bottom.add(af,weight=2);bottom.add(pf,weight=4)
+        af.rowconfigure(1,weight=1);af.columnconfigure(0,weight=1)
+        ab=ttk.Frame(af);ab.grid(row=0,column=0,sticky="ew")
+        ttk.Button(ab,text="删除选中错误译名",command=lambda:self._review_delete_alias(win)).pack(side="left")
+        ttk.Button(ab,text="导入错误译名表…",command=lambda:self._import_error_aliases(refresh_window=win)).pack(side="left",padx=4)
+        ttk.Button(ab,text="选择并导出…",command=self._export_error_aliases_v44).pack(side="left")
+        old_page=self._current_tree_page;self._current_tree_page="dictcheck"
+        self.alias_tree=self._tree(af,("use","wrong","correct","source_term","source"),("选择","错误译名","正确译名","对应辞典原词","来源"),(60,190,190,190,180),checkbox=True)
+        self.alias_tree.master.grid(row=1,column=0,sticky="nsew")
+
+        pf.rowconfigure(1,weight=1);pf.columnconfigure(0,weight=1)
+        pb=ttk.Frame(pf);pb.grid(row=0,column=0,sticky="ew")
+        ttk.Button(pb,text="全选自动替换",command=lambda:self._check_all(self.auto_tree,True)).pack(side="left")
+        ttk.Button(pb,text="全不选",command=lambda:self._check_all(self.auto_tree,False)).pack(side="left",padx=3)
+        ttk.Button(pb,text="应用勾选自动替换",command=lambda:self._review_apply_auto(win)).pack(side="left",padx=8)
+        ttk.Label(pb,text="正确译名本身受保护；短错误词不会在正确译名内部再次扩写。",foreground="#555").pack(side="left",padx=8)
+        self.auto_tree=self._tree(pf,("use","file","reason","original","translated","proposed"),("选择","文件","命中错误译名","原文","当前译文","替换预览"),(60,190,180,340,340,340),checkbox=True)
+        self.auto_tree.master.grid(row=1,column=0,sticky="nsew");self.auto_tree.bind("<Double-1>",self._review_auto_double)
+        self._current_tree_page=old_page
+        self.review_warning_map={};self.auto_change_map={}
+        self._review_refresh_warning_tree_v44();self._review_refresh_alias_tree_v44();self._review_refresh_auto_v44(win)
+
+    def _review_active_aliases(self):
+        if not self.review_term_filter:return list(self.error_aliases)
+        return [x for x in self.error_aliases if x.source_term==self.review_term_filter]
+
+    def _mark_alias_managed_warnings(self):
+        aliases=self._review_active_aliases()
+        if not aliases:return
+        for w in self.current_dict_warnings:
+            if self.review_term_filter and w.original_term!=self.review_term_filter:continue
+            if warning_is_covered_by_alias(w,aliases):self.dict_review_states[w.key]="自动替换候选"
+
+    def _review_refresh_warning_tree_v44(self):
+        if not hasattr(self,"review_tree"):return
+        self._clear_tree(self.review_tree);self.review_warning_map={}
+        n=0
+        for w in self.current_dict_warnings:
+            if self.review_term_filter and w.original_term!=self.review_term_filter:continue
+            state=self.dict_review_states.get(w.key,"待确认")
+            if state!="待确认":continue
+            iid=f"w{n}";n+=1;self.review_warning_map[iid]=w
+            self.review_tree.insert("","end",iid=iid,values=(state,w.original_term,w.expected_translation,w.record.file_key))
+        kids=self.review_tree.get_children("")
+        if kids:self.review_tree.selection_set(kids[0]);self.review_tree.focus(kids[0]);self._review_show_current()
+
+    def _review_add_error_alias_v44(self,win):
+        w=self._review_current_warning();wrong=self._selected_text(self.review_translated).strip()
+        if not w or not wrong:
+            messagebox.showinfo("错误译名","请先在译文框中划选实际翻错的词。",parent=win);return
+        correct=w.expected_translation.strip()
+        if w.original_term=="（错误译名二次确认）":
+            inferred=next((a.correct for a in sorted(self.error_aliases,key=lambda x:-len(x.wrong)) if a.wrong in wrong),"")
+            if inferred:correct=inferred
+        if not correct:correct=simpledialog.askstring("错误译名",f"请输入“{wrong}”应统一为的正确译名：",parent=win) or ""
+        if not correct:return
+        source_term = self.review_term_filter or w.original_term
+        if w.original_term == "（错误译名二次确认）":
+            inferred_term = next((a.source_term for a in sorted(self.error_aliases,key=lambda x:-len(x.wrong)) if a.wrong in wrong and a.source_term), "")
+            source_term = self.review_term_filter or inferred_term or "（二次确认）"
+        self._add_error_alias(ErrorAlias(wrong,correct,source_term,"辞典逐句确认"))
+        # Immediately suppress *all* manual warnings now handled by the alias.
+        aliases=self._review_active_aliases()
+        covered=0
+        for warning in self.current_dict_warnings:
+            if self.review_term_filter and warning.original_term!=self.review_term_filter:continue
+            if warning_is_covered_by_alias(warning,aliases):
+                self.dict_review_states[warning.key]="自动替换候选";covered+=1
+        self._review_refresh_warning_tree_v44();self._review_refresh_alias_tree_v44();self._review_refresh_auto_v44(win)
+        self.status_var.set(f"已加入错误译名 {wrong} → {correct}；{covered} 条对应人工警告转入自动替换预览。")
+
+    def _review_refresh_alias_tree_v44(self):
+        if not hasattr(self,"alias_tree"):return
+        self._clear_tree(self.alias_tree)
+        for n,x in enumerate(sorted(self.error_aliases,key=lambda z:(z.source_term,-len(z.wrong),z.wrong))):
+            self.alias_tree.insert("","end",iid=f"a{n}",values=("☐",x.wrong,x.correct,x.source_term,x.source))
+
+    def _review_refresh_alias_tree(self):
+        # Called by inherited delete/import helpers.
+        if hasattr(self,"alias_tree") and "use" in self.alias_tree["columns"]:self._review_refresh_alias_tree_v44()
+        else:super()._review_refresh_alias_tree()
+
+    def _review_refresh_warning_tree(self):
+        if hasattr(self,"review_tree") and self.review_tree.winfo_exists():self._review_refresh_warning_tree_v44()
+
+    def _review_refresh_auto_v44(self,win):
+        if not hasattr(self,"auto_tree"):return
+        self._clear_tree(self.auto_tree)
+        aliases=self._review_active_aliases()
+        records=self.active_records()
+        if self.review_term_filter:records=[r for r in records if self.review_term_filter in r.original]
+        changes=build_error_alias_changes(records,aliases);self.auto_change_map={}
+        for n,c in enumerate(changes):
+            iid=f"p{n}";self.auto_change_map[iid]=c
+            self.auto_tree.insert("","end",iid=iid,values=("☑",c.record.file_key,c.reason,self._display(c.record.original),self._display(c.record.translated),self._display(c.proposed)))
+
+    def _review_refresh_auto(self,win):
+        if hasattr(self,"auto_tree") and "use" in self.auto_tree["columns"]:self._review_refresh_auto_v44(win)
+        else:super()._review_refresh_auto(win)
+
+    def _review_rescan_warnings_v44(self,win):
+        # Explicit recheck is the only operation that deliberately lets previously
+        # alias-managed warnings re-enter the manual queue.
+        self.dict_review_states={}
+        self.current_dict_warnings=analyze_dictionary(self.active_records(),self.current_dict_entries,self.dict_messages_only.get())
+        self._show_dict_warnings(self.current_dict_warnings);self._review_refresh_warning_tree_v44();self._review_refresh_auto_v44(win)
+
+    def _import_error_aliases(self,refresh_window=None):
+        paths=filedialog.askopenfilenames(parent=self,filetypes=[("错误译名表","*.xlsx *.xlsm *.csv")])
         if not paths:return
+        added=0
         try:
-            for p in paths:self.dictionary_rows.extend(self._load_dictionary_with_category(Path(p)))
-            self._refresh_dictionary_tree();self.status_var.set(f"辞典页共 {len(self.dictionary_rows)} 行。")
-        except Exception as exc:messagebox.showerror("导入失败",str(exc),parent=self)
+            for p in paths:
+                for alias in load_error_aliases(Path(p)):
+                    before=len(self.error_aliases);self._add_error_alias(alias);added+=1 if len(self.error_aliases)>=before else 0
+            self._mark_alias_managed_warnings()
+            if refresh_window is not None:
+                self._review_refresh_warning_tree_v44();self._review_refresh_alias_tree_v44();self._review_refresh_auto_v44(refresh_window)
+            self.status_var.set(f"已导入/更新错误译名 {added} 项；当前共 {len(self.error_aliases)} 项。")
+        except Exception as exc:messagebox.showerror("导入错误译名失败",str(exc),parent=self)
 
-    def _match_external_to_dictionary(self):
-        paths=filedialog.askopenfilenames(parent=self,filetypes=[("辞典","*.xlsx *.xlsm *.csv")])
-        if not paths:return
+    def _export_error_aliases_v44(self):
+        if not self.error_aliases:
+            messagebox.showinfo("错误译名","当前没有错误译名。",parent=self);return
+        top=tk.Toplevel(self);top.title("选择要导出的错误译名");top.geometry("850x620");top.transient(self)
+        terms=["全部"]+sorted({x.source_term or "（无对应辞典原词）" for x in self.error_aliases})
+        term=tk.StringVar(value="全部")
+        bar=ttk.Frame(top);bar.pack(fill="x",padx=6,pady=6)
+        ttk.Label(bar,text="对应辞典原词：").pack(side="left")
+        combo=ttk.Combobox(bar,textvariable=term,state="readonly",values=terms,width=28);combo.pack(side="left")
+        old_page=self._current_tree_page;self._current_tree_page="dictcheck"
+        tree=self._tree(top,("use","wrong","correct","source_term","source"),("选择","错误译名","正确译名","对应辞典原词","来源"),(60,190,190,190,180),checkbox=True)
+        tree.master.pack(fill="both",expand=True,padx=6,pady=(0,6));self._current_tree_page=old_page
+        amap={}
+        def refresh(*_):
+            self._clear_tree(tree);amap.clear();target=term.get()
+            for n,x in enumerate(sorted(self.error_aliases,key=lambda z:(z.source_term,-len(z.wrong),z.wrong))):
+                lab=x.source_term or "（无对应辞典原词）"
+                if target!="全部" and lab!=target:continue
+                iid=f"e{n}";amap[iid]=x;tree.insert("","end",iid=iid,values=("☐",x.wrong,x.correct,x.source_term,x.source))
+        combo.bind("<<ComboboxSelected>>",refresh);refresh()
+        buttons=ttk.Frame(top);buttons.pack(fill="x",padx=6,pady=(0,6))
+        ttk.Button(buttons,text="全选当前显示",command=lambda:self._check_all(tree,True)).pack(side="left")
+        ttk.Button(buttons,text="全不选",command=lambda:self._check_all(tree,False)).pack(side="left",padx=4)
+        def export():
+            aliases=[amap[i] for i in self._checked_iids(tree) if i in amap]
+            if not aliases:
+                messagebox.showinfo("错误译名","请至少勾选一项。",parent=top);return
+            p=filedialog.asksaveasfilename(parent=top,defaultextension=".xlsx",filetypes=[("Excel","*.xlsx"),("CSV","*.csv")])
+            if p:save_error_aliases(Path(p),aliases);messagebox.showinfo("导出完成",p,parent=top)
+        ttk.Button(buttons,text="导出勾选项…",command=export).pack(side="right")
+
+
+    # ------------------------------------------------------------------
+    # v4.5 vertical three-section layout: list/context | original+translation | font preview
+    # ------------------------------------------------------------------
+    def _line_pixel_height(self):
         try:
-            rows=[]
-            for p in paths:rows.extend(self._load_dictionary_with_category(Path(p)))
-            used=build_used_dictionary(self.active_records(),rows);self.dictionary_rows.extend(used);self._refresh_dictionary_tree();self.status_var.set(f"匹配并加入 {len(used)} 行。")
-        except Exception as exc:messagebox.showerror("匹配失败",str(exc),parent=self)
+            f=self._font_object(); return max(20, int(f.metrics("linespace"))+6)
+        except Exception:
+            return 24
 
-    def _do_dictcheck_external(self):
-        paths=filedialog.askopenfilenames(parent=self,filetypes=[("辞典","*.xlsx *.xlsm *.csv")])
-        if not paths:return
-        try:
-            rows=[]
-            for p in paths:rows.extend(self._load_dictionary_with_category(Path(p)))
-            entries=self._resolve_conflicts(rows)
-            if entries is not None:self._show_dict_warnings(self._dictionary_warnings(entries))
-        except Exception as exc:messagebox.showerror("检查失败",str(exc),parent=self)
+    def _make_vertical_sash(self, parent, row, start_cb, drag_cb):
+        sash=ttk.Frame(parent, height=7, cursor="sb_v_double_arrow", relief="groove")
+        sash.grid(row=row,column=0,sticky="ew",pady=1)
+        sash.grid_propagate(False)
+        sash.bind("<ButtonPress-1>",start_cb)
+        sash.bind("<B1-Motion>",drag_cb)
+        return sash
 
-    def _dictionary_warnings(self, entries):
-        from workbench_core import analyze_dictionary
-        return analyze_dictionary(self.active_records(),entries,self.dict_messages_only.get())
+    def _install_width_vertical_layout(self):
+        tab=self.tabs["width"]
+        self.width_tree.master.grid_configure(row=1,sticky="nsew")
+        self.width_dual_pane.grid_configure(row=3,sticky="nsew",pady=(2,2))
+        self.width_preview_frame.grid_configure(row=5,sticky="nsew")
+        self.width_layout_ctl.grid_configure(row=6,sticky="ew",pady=(4,0))
+        self.width_sash_top=self._make_vertical_sash(tab,2,self._width_sash1_start,self._width_sash1_drag)
+        self.width_sash_bottom=self._make_vertical_sash(tab,4,self._width_sash2_start,self._width_sash2_drag)
+        for r in range(0,7): tab.rowconfigure(r,weight=0)
+        tab.rowconfigure(1,weight=1,minsize=120)
+        self._sync_width_grid_sizes()
+
+    def _sync_width_grid_sizes(self):
+        if not hasattr(self,"width_dual_pane"): return
+        tab=self.tabs["width"]; lh=self._line_pixel_height()
+        tab.rowconfigure(3,minsize=max(110,int(self.width_text_height.get())*lh+48))
+        tab.rowconfigure(5,minsize=max(100,int(self.width_preview_height.get())))
+
+    def _width_sash1_start(self,e):
+        self._width_drag=(e.y_root,int(self.width_text_height.get()),int(self.width_preview_height.get()))
+    def _width_sash1_drag(self,e):
+        if not hasattr(self,"_width_drag"):return
+        y,h,p=self._width_drag; dy=e.y_root-y; lh=self._line_pixel_height()
+        self.width_text_height.set(max(3,min(18,h-round(dy/lh)))); self._apply_width_layout()
+    def _width_sash2_start(self,e):
+        self._width_drag=(e.y_root,int(self.width_text_height.get()),int(self.width_preview_height.get()))
+    def _width_sash2_drag(self,e):
+        if not hasattr(self,"_width_drag"):return
+        y,h,p=self._width_drag; dy=e.y_root-y; lh=self._line_pixel_height()
+        nh=max(3,min(18,h+round(dy/lh))); np=max(100,min(700,p-dy))
+        self.width_text_height.set(nh); self.width_preview_height.set(np); self._apply_width_layout()
+
+    def _install_editor_vertical_layout(self):
+        tab=self.tabs["editor"]
+        context_frame=self.context_tree.master.master
+        # Move the transformation/operator toolbars above the three vertically resizable sections.
+        extras=[]
+        for child in tab.winfo_children():
+            try: row=int(child.grid_info().get("row",-1))
+            except Exception: row=-1
+            if row in {4,5} and child not in {self.editor_text_pane,self.editor_preview_frame,self.editor_layout_ctl}:
+                extras.append((row,child))
+        for oldrow,child in extras:
+            child.grid_configure(row=2 if oldrow==4 else 3)
+        context_frame.grid_configure(row=4,sticky="nsew")
+        self.editor_text_pane.grid_configure(row=6,sticky="nsew",pady=(2,2))
+        self.editor_preview_frame.grid_configure(row=8,sticky="nsew")
+        self.editor_layout_ctl.grid_configure(row=9,sticky="ew",pady=(4,0))
+        self.editor_sash_top=self._make_vertical_sash(tab,5,self._editor_sash1_start,self._editor_sash1_drag)
+        self.editor_sash_bottom=self._make_vertical_sash(tab,7,self._editor_sash2_start,self._editor_sash2_drag)
+        for r in range(0,10): tab.rowconfigure(r,weight=0)
+        tab.rowconfigure(4,weight=1,minsize=120)
+        self._sync_editor_grid_sizes()
+
+    def _sync_editor_grid_sizes(self):
+        if not hasattr(self,"editor_text_pane"):return
+        tab=self.tabs["editor"]; lh=self._line_pixel_height()
+        tab.rowconfigure(6,minsize=max(110,int(self.editor_text_height.get())*lh+48))
+        tab.rowconfigure(8,minsize=max(90,int(self.editor_preview_height.get())))
+
+    def _editor_sash1_start(self,e):
+        self._editor_drag=(e.y_root,int(self.editor_text_height.get()),int(self.editor_preview_height.get()))
+    def _editor_sash1_drag(self,e):
+        if not hasattr(self,"_editor_drag"):return
+        y,h,p=self._editor_drag;dy=e.y_root-y;lh=self._line_pixel_height()
+        self.editor_text_height.set(max(3,min(18,h-round(dy/lh))));self._apply_editor_layout()
+    def _editor_sash2_start(self,e):
+        self._editor_drag=(e.y_root,int(self.editor_text_height.get()),int(self.editor_preview_height.get()))
+    def _editor_sash2_drag(self,e):
+        if not hasattr(self,"_editor_drag"):return
+        y,h,p=self._editor_drag;dy=e.y_root-y;lh=self._line_pixel_height()
+        self.editor_text_height.set(max(3,min(18,h+round(dy/lh))));self.editor_preview_height.set(max(90,min(700,p-dy)));self._apply_editor_layout()
+
+    # ------------------------------------------------------------------
+    # Dictionary quick search
+    # ------------------------------------------------------------------
+    def _refresh_dictionary_tree(self):
+        if not hasattr(self,"dictionary_tree"):return
+        query=(self.dictionary_query.get().strip().casefold() if hasattr(self,"dictionary_query") else "")
+        self._clear_tree(self.dictionary_tree)
+        shown=0
+        for i,r in enumerate(self.dictionary_rows):
+            hay="\n".join([r.original,r.translation,r.category,r.source]).casefold()
+            if query and query not in hay:continue
+            self.dictionary_tree.insert("","end",iid=f"d{i}",values=(r.original,r.translation,r.category,r.source));shown+=1
+        if query:self.status_var.set(f"辞典查询“{self.dictionary_query.get()}”：显示 {shown}/{len(self.dictionary_rows)} 行。")
+
+    # ------------------------------------------------------------------
+    # Punctuation workspace v4.5: three independent diagnostic tabs
+    # ------------------------------------------------------------------
+    def _build_punctuation_workspace(self):
+        super()._build_punctuation_workspace()
+        for key,title,builder in [
+            ("english_period","英文句号结尾",self._build_english_period_panel),
+            ("dunhao","句中顿号",self._build_dunhao_panel),
+            ("spaces","空格检查",self._build_space_panel),
+        ]:
+            frame=ttk.Frame(self.punct_notebook,padding=6);self.punct_notebook.add(frame,text=title);self.punct_tabs[key]=frame;builder(frame)
+
+    def _build_terminal_panel(self):
+        # Use the clean sentence-terminal panel only; v4.3's combined special-format
+        # button is intentionally removed in v4.5.
+        V4App._build_terminal_panel(self)
+
+    def _build_english_period_panel(self,tab):
+        tab.rowconfigure(2,weight=1);tab.columnconfigure(0,weight=1)
+        bar=ttk.Frame(tab);bar.grid(row=0,column=0,sticky="ew")
+        ttk.Button(bar,text="检查译文英文句号结尾",command=self._scan_english_period).pack(side="left")
+        ttk.Button(bar,text="全选原文不是英文句号",command=lambda:self._select_english_period("not_dot")).pack(side="left",padx=(10,3))
+        ttk.Button(bar,text='全选原文是“。”句号',command=lambda:self._select_english_period("cn_dot")).pack(side="left")
+        ttk.Button(bar,text="全不选",command=lambda:self._check_all(self.english_period_tree,False)).pack(side="left",padx=3)
+        ttk.Button(bar,text="预览勾选：译文 . → 。",command=self._preview_english_period).pack(side="right")
+        act=ttk.Frame(tab);act.grid(row=1,column=0,sticky="ew",pady=4)
+        ttk.Label(act,text="原文本身以英文句号 . 结尾且译文也是 . 的记录属于正常情况，不进入列表。",foreground="#555").pack(side="left")
+        ttk.Button(act,text="应用勾选预览",command=self._apply_english_period).pack(side="right")
+        self.english_period_tree=self._tree(tab,("use","source_kind","source_end","file","original","translated","proposed"),
+            ("选择","原文结尾类型","原文末符","文件","原文","译文","处理结果"),(60,120,80,220,430,430,430),checkbox=True)
+        self.english_period_tree.master.grid(row=2,column=0,sticky="nsew");self.english_period_tree.bind("<Double-1>",lambda e:self._double_to_editor_event("english_period",self.english_period_tree,e))
+        self.english_period_rows={};self.english_period_changes={}
+
+    def _scan_english_period(self):
+        rows=analyze_english_period_endings(self.active_records());self.english_period_rows={};self.english_period_changes={};self.result_maps["english_period"]={};self._clear_tree(self.english_period_tree)
+        for i,row in enumerate(rows):
+            iid=f"ep{i}";self.english_period_rows[iid]=row;self.result_maps["english_period"][iid]=row.record
+            self.english_period_tree.insert("","end",iid=iid,values=("☐",row.source_kind,row.source_terminal or "（无）",row.record.file_key,self._display(row.record.original),self._display(row.record.translated),""))
+        self.status_var.set(f"译文英文句号结尾且原文不是英文句号：{len(rows)} 条。")
+
+    def _select_english_period(self,mode):
+        for iid in self.english_period_tree.get_children(""):
+            row=self.english_period_rows.get(iid);vals=list(self.english_period_tree.item(iid,"values"))
+            ok=bool(row) and (mode=="not_dot" or (mode=="cn_dot" and row.source_terminal=="。"))
+            vals[0]="☑" if ok else "☐";self.english_period_tree.item(iid,values=vals)
+
+    def _preview_english_period(self):
+        self.english_period_changes={}
+        for iid in self._checked_iids(self.english_period_tree):
+            row=self.english_period_rows.get(iid)
+            if not row:continue
+            proposed=replace_terminal_english_period(row.record.translated,"。")
+            if proposed!=row.record.translated:self.english_period_changes[row.record.uid]=TextChange(row.record,"英文句号结尾→中文句号",proposed)
+            self.english_period_tree.set(iid,"proposed",self._display(proposed) if proposed!=row.record.translated else "")
+        self.status_var.set(f"英文句号结尾预览：{len(self.english_period_changes)} 条会修改。")
+
+    def _apply_english_period(self):
+        updates={uid:(c.record,c.proposed) for uid,c in self.english_period_changes.items()}
+        if self._save_updates_v42(updates,"英文句号结尾"):
+            self._scan_english_period()
+
+    def _build_dunhao_panel(self,tab):
+        tab.rowconfigure(2,weight=1);tab.columnconfigure(0,weight=1)
+        bar=ttk.Frame(tab);bar.grid(row=0,column=0,sticky="ew")
+        ttk.Button(bar,text="检查译文顿号",command=self._scan_dunhao).pack(side="left")
+        for text,mode in [("全选行尾顿号","line_end"),("全选前后同字","stutter"),("全选多个顿号","multiple"),("全选其他情况","other")]:
+            ttk.Button(bar,text=text,command=lambda m=mode:self._select_dunhao(m)).pack(side="left",padx=2)
+        ttk.Button(bar,text="全不选",command=lambda:self._check_all(self.dunhao_tree,False)).pack(side="left",padx=3)
+        act=ttk.Frame(tab);act.grid(row=1,column=0,sticky="ew",pady=4)
+        ttk.Button(act,text="预览：勾选文本内所有顿号 → ，",command=lambda:self._preview_dunhao("all")).pack(side="left")
+        ttk.Button(act,text="预览：只替换每行结尾顿号 → ，",command=lambda:self._preview_dunhao("line_end")).pack(side="left",padx=4)
+        ttk.Button(act,text="应用勾选预览",command=self._apply_dunhao).pack(side="left",padx=8)
+        ttk.Label(act,text="‘前后同字’常见于结巴；‘多个顿号’可能是排比；因此默认只检查，不自动勾选。",foreground="#555").pack(side="left",padx=10)
+        self.dunhao_tree=self._tree(tab,("use","line_end","stutter","multiple","other","count","file","detail","original","translated","proposed"),
+            ("选择","行尾","前后同字","多个顿号","其他","顿号数","文件","分类说明","原文","译文","处理结果"),(60,60,85,85,65,65,210,210,380,380,380),checkbox=True)
+        self.dunhao_tree.master.grid(row=2,column=0,sticky="nsew");self.dunhao_tree.bind("<Double-1>",lambda e:self._double_to_editor_event("dunhao",self.dunhao_tree,e))
+        self.dunhao_rows={};self.dunhao_changes={}
+
+    def _scan_dunhao(self):
+        rows=analyze_dunhao_usage(self.active_records());self.dunhao_rows={};self.dunhao_changes={};self.result_maps["dunhao"]={};self._clear_tree(self.dunhao_tree)
+        for i,row in enumerate(rows):
+            iid=f"dh{i}";self.dunhao_rows[iid]=row;self.result_maps["dunhao"][iid]=row.record
+            self.dunhao_tree.insert("","end",iid=iid,values=("☐","是" if row.line_end_count else "否","是" if row.stutter_count else "否","是" if row.multiple else "否","是" if row.other else "否",row.total_count,row.record.file_key,row.detail,self._display(row.record.original),self._display(row.record.translated),""))
+        self.status_var.set(f"译文含顿号：{len(rows)} 条文本。")
+
+    def _select_dunhao(self,mode):
+        for iid,row in self.dunhao_rows.items():
+            vals=list(self.dunhao_tree.item(iid,"values"));ok={"line_end":row.line_end_count>0,"stutter":row.stutter_count>0,"multiple":row.multiple,"other":row.other}[mode]
+            vals[0]="☑" if ok else "☐";self.dunhao_tree.item(iid,values=vals)
+
+    def _preview_dunhao(self,mode):
+        self.dunhao_changes={}
+        for iid in self._checked_iids(self.dunhao_tree):
+            row=self.dunhao_rows.get(iid)
+            if not row:continue
+            proposed=replace_dunhao_line_end(row.record.translated,"，") if mode=="line_end" else replace_dunhao_all(row.record.translated,"，")
+            if proposed!=row.record.translated:self.dunhao_changes[row.record.uid]=TextChange(row.record,"顿号→逗号" if mode=="all" else "仅行尾顿号→逗号",proposed)
+            self.dunhao_tree.set(iid,"proposed",self._display(proposed) if proposed!=row.record.translated else "")
+        self.status_var.set(f"顿号替换预览：{len(self.dunhao_changes)} 条会修改。")
+
+    def _apply_dunhao(self):
+        updates={uid:(c.record,c.proposed) for uid,c in self.dunhao_changes.items()}
+        if self._save_updates_v42(updates,"顿号替换"):self._scan_dunhao()
+
+    def _build_space_panel(self,tab):
+        tab.rowconfigure(2,weight=1);tab.columnconfigure(0,weight=1)
+        bar=ttk.Frame(tab);bar.grid(row=0,column=0,sticky="ew")
+        self.space_preserve_source_trailing=tk.BooleanVar(value=True)
+        ttk.Button(bar,text="检查空格结构",command=lambda:self._scan_spaces(False)).pack(side="left")
+        ttk.Button(bar,text="查看所有原文/译文带空格文本",command=lambda:self._scan_spaces(True)).pack(side="left",padx=4)
+        ttk.Checkbutton(bar,text="原文同行也有行尾空格时，不删除译文行尾空格",variable=self.space_preserve_source_trailing).pack(side="left",padx=10)
+        act=ttk.Frame(tab);act.grid(row=1,column=0,sticky="ew",pady=4)
+        for text,cat in [("全选原文行首空格","原文行首空格"),("全选译文行尾空格","译文行尾空格"),("全选中间空格不一致","文本中间空格不一致")]:
+            ttk.Button(act,text=text,command=lambda c=cat:self._select_space_category(c)).pack(side="left",padx=2)
+        ttk.Button(act,text="全不选",command=lambda:self._check_all(self.space_tree,False)).pack(side="left",padx=3)
+        ttk.Button(act,text="预览补齐原文行首空格",command=lambda:self._preview_spaces("leading")).pack(side="left",padx=(10,3))
+        ttk.Button(act,text="预览删除译文行尾空格",command=lambda:self._preview_spaces("trailing")).pack(side="left")
+        ttk.Button(act,text="应用预览",command=self._apply_spaces).pack(side="right")
+        self.space_tree=self._tree(tab,("use","category","lines","auto","file","detail","original","translated","proposed"),
+            ("选择","类型","行号","可自动","文件","说明","原文","译文","处理结果"),(60,150,100,80,210,300,390,390,390),checkbox=True)
+        self.space_tree.master.grid(row=2,column=0,sticky="nsew");self.space_tree.bind("<Double-1>",lambda e:self._double_to_editor_event("spaces",self.space_tree,e))
+        self.space_rows={};self.space_changes={}
+
+    def _scan_spaces(self,include_all=False):
+        rows=analyze_space_structure(self.active_records(),include_all_with_spaces=include_all,preserve_source_trailing=self.space_preserve_source_trailing.get())
+        self.space_rows={};self.space_changes={};self.result_maps["spaces"]={};self._clear_tree(self.space_tree)
+        for i,row in enumerate(rows):
+            iid=f"spc{i}";self.space_rows[iid]=row;self.result_maps["spaces"][iid]=row.record
+            self.space_tree.insert("","end",iid=iid,values=("☐",row.category,",".join(map(str,row.lines)),"是" if row.proposed is not None else "否",row.record.file_key,row.detail,self._display(row.record.original),self._display(row.record.translated),""))
+        self.status_var.set(f"空格检查：{len(rows)} 项。")
+
+    def _select_space_category(self,category):
+        for iid,row in self.space_rows.items():
+            vals=list(self.space_tree.item(iid,"values"));vals[0]="☑" if row.category==category else "☐";self.space_tree.item(iid,values=vals)
+
+    def _preview_spaces(self,mode):
+        self.space_changes={}
+        selected_by_uid={}
+        for iid in self._checked_iids(self.space_tree):
+            row=self.space_rows.get(iid)
+            if row:selected_by_uid.setdefault(row.record.uid,row.record)
+        for uid,rec in selected_by_uid.items():
+            text=rec.translated
+            temp=rec
+            if mode=="leading":
+                proposed=sync_missing_source_leading_spaces(temp)
+            else:
+                proposed=remove_translation_trailing_spaces(temp,self.space_preserve_source_trailing.get())
+            if proposed is not None and proposed!=text:self.space_changes[uid]=TextChange(rec,"补齐原文行首空格" if mode=="leading" else "删除译文行尾空格",proposed)
+        for iid,row in self.space_rows.items():
+            c=self.space_changes.get(row.record.uid);self.space_tree.set(iid,"proposed",self._display(c.proposed) if c else "")
+        self.status_var.set(f"空格处理预览：{len(self.space_changes)} 条会修改。")
+
+    def _apply_spaces(self):
+        updates={uid:(c.record,c.proposed) for uid,c in self.space_changes.items()}
+        if self._save_updates_v42(updates,"空格处理"):self._scan_spaces(False)
+
+    # ------------------------------------------------------------------
+    # Keep inherited speaker->aliases flow, but v4.4 review uses the safe engine.
+    # ------------------------------------------------------------------
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RPG制作大师校对工具")
+    parser = argparse.ArgumentParser(description=APP_TITLE)
     parser.add_argument("--initial-input")
     parser.add_argument("--initial-origin-dir")
     parser.add_argument("--initial-translated-dir")
+    parser.add_argument("--initial-dictionary", action="append", default=[],
+                        help="可选辞典文件，可重复传入；不存在时跳过")
     args = parser.parse_args()
-    app=RPGMakerProofreadingApp(
+    app = RPGMakerProofreadingApp(
         initial_input=args.initial_input,
         initial_origin_dir=args.initial_origin_dir,
         initial_translated_dir=args.initial_translated_dir,
-    );app.mainloop()
+        initial_dictionaries=args.initial_dictionary,
+    )
+    app.mainloop()
 
 
 if __name__=="__main__":main()

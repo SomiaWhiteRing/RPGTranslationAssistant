@@ -65,6 +65,7 @@ QUOTE_PAIRS = OrderedDict([
     ('""', ('"', '"')),
     ("''", ("'", "'")),
     ("｢｣", ("｢", "｣")),
+    ("[]", ("[", "]")),
 ])
 OPEN_TO_CLOSE = {op: cl for op, cl in QUOTE_PAIRS.values()}
 ALL_QUOTES = set(OPEN_TO_CLOSE) | set(OPEN_TO_CLOSE.values())
@@ -566,14 +567,17 @@ def _format_occurrence(lines: list[str], occ: ParsedOccurrence, translated: str)
     return [f"{lead}{translated.strip()}{trail}\n"]
 
 
-def apply_translation_updates(updates: Mapping[str, tuple[DataRecord, str]], log: LogFn = noop) -> tuple[int, Path]:
+def apply_translation_updates(updates: Mapping[str, tuple[DataRecord, str]], log: LogFn = noop,
+                              create_backup: bool = True) -> tuple[int, Path | None]:
     if not updates: raise QAError("没有需要保存的修改。")
     kinds = {r.source_kind for r, _ in updates.values()}
     if len(kinds) != 1: raise QAError("一次保存只能处理同一种数据源。")
     kind = next(iter(kinds)); records = [r for r, _ in updates.values()]
     if kind == "json":
         path = records[0].translated_open_path
-        root = _backup_root(path.parent, "Edit"); root.mkdir(parents=True, exist_ok=True); shutil.copy2(path, root/path.name)
+        root = _backup_root(path.parent, "Edit") if create_backup else None
+        if root is not None:
+            root.mkdir(parents=True, exist_ok=True); shutil.copy2(path, root/path.name)
         with path.open("r", encoding="utf-8-sig") as fh: data = json.load(fh, object_pairs_hook=_no_duplicate_object)
         for rec, proposed in updates.values():
             file_key, original_key = rec.update_ref
@@ -583,13 +587,14 @@ def apply_translation_updates(updates: Mapping[str, tuple[DataRecord, str]], log
         _atomic_json(path, data); return len(updates), root
     if kind == "excel":
         table_dir = Path(str(records[0].metadata.get("table_dir") or records[0].translated_open_path.parent))
-        root = _backup_root(table_dir, "Edit")
+        root = _backup_root(table_dir, "Edit") if create_backup else None
         grouped: dict[Path, list[tuple[DataRecord, str]]] = defaultdict(list)
         for rec, proposed in updates.values(): grouped[rec.translated_open_path].append((rec, proposed))
         count = 0
         for path, items in grouped.items():
             rel = path.relative_to(table_dir) if path.is_relative_to(table_dir) else Path(path.name)
-            bp = root/rel; bp.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(path, bp)
+            if root is not None:
+                bp = root/rel; bp.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(path, bp)
             wb = load_workbook(path, read_only=False, data_only=False, keep_vba=path.suffix.lower()==".xlsm")
             try:
                 for rec, proposed in items:
@@ -603,7 +608,7 @@ def apply_translation_updates(updates: Mapping[str, tuple[DataRecord, str]], log
         return count, root
     if kind == "txt":
         translated_dir = Path(str(records[0].metadata.get("translated_dir") or records[0].translated_open_path.parent))
-        root = _backup_root(translated_dir.parent, "Edit")
+        root = _backup_root(translated_dir.parent, "Edit") if create_backup else None
         grouped: dict[Path, list[tuple[DataRecord, str]]] = defaultdict(list)
         for rec, proposed in updates.values(): grouped[rec.translated_open_path].append((rec, proposed))
         count = 0
@@ -611,7 +616,8 @@ def apply_translation_updates(updates: Mapping[str, tuple[DataRecord, str]], log
             if not path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(items[0][0].original_open_path, path)
             rel = path.relative_to(translated_dir) if path.is_relative_to(translated_dir) else Path(path.name)
-            bp = root/translated_dir.name/rel; bp.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(path, bp)
+            if root is not None:
+                bp = root/translated_dir.name/rel; bp.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(path, bp)
             fmt = items[0][0].metadata.get("translated_format") or {"codec":"utf-8","bom":False,"newline":"\n"}
             text, codec, bom, newline = read_text_file(path, str(fmt.get("codec", "utf-8")))
             occs = {x.locator:x for x in parse_string_script_text(text)}
@@ -1430,22 +1436,53 @@ def build_quote_situation_proposal(record: DataRecord, form: str,
 
 
 def default_symbol_catalog() -> list[SymbolCatalogEntry]:
-    groups = [
-        ("点号", [("。", "句号", [".", "．"]), ("？", "问号", ["?"]), ("！", "叹号", ["!"]),
-                  ("，", "逗号", [",", "、"]), ("、", "顿号", ["，", ","]), ("；", "分号", [";"]), ("：", "冒号", [":"])]),
-        ("标号", [("“", "左双引号", ["「", "『", '"']), ("”", "右双引号", ["」", "』", '"']),
-                  ("‘", "左单引号", ["'", "「"]), ("’", "右单引号", ["'", "」"]),
-                  ("（", "左圆括号", ["("]), ("）", "右圆括号", [")"]), ("[", "左方括号", ["［", "【"]), ("]", "右方括号", ["］", "】"]),
-                  ("{", "左花括号", ["｛"]), ("}", "右花括号", ["｝"]), ("——", "破折号", ["—"]),
-                  ("……", "省略号", ["…", "..."]), ("．", "着重号", ["."]), ("《", "左书名号", ["〈"]), ("》", "右书名号", ["〉"]),
-                  ("·", "间隔号", ["・"]), ("—", "连接号", ["－", "-"]), ("____", "专名号", ["＿"]), ("/", "分隔号", ["／"])])
+    """Editable default punctuation catalogue used by the UI.
+
+    Halfwidth/fullwidth variants are explicit rows rather than only peers so a
+    discovered ASCII symbol such as ! or ? is never shown as "未分类".
+    """
+    raw = [
+        # 点号
+        ("。", "点号", "句号（中文/日文句点）", ("．", ".")),
+        ("．", "点号", "全角句点/着重号", ("。", ".")),
+        (".", "点号", "英文句号（半角）", ("。", "．")),
+        ("？", "点号", "问号（全角）", ("?",)), ("?", "点号", "问号（半角）", ("？",)),
+        ("！", "点号", "感叹号（全角）", ("!",)), ("!", "点号", "感叹号（半角）", ("！",)),
+        ("，", "点号", "逗号（中文全角）", (",", "、")), (",", "点号", "逗号（半角）", ("，", "、")),
+        ("、", "点号", "顿号/日文読点", ("，", ",")),
+        ("；", "点号", "分号（全角）", (";",)), (";", "点号", "分号（半角）", ("；",)),
+        ("：", "点号", "冒号（全角）", (":",)), (":", "点号", "冒号（半角）", ("：",)),
+        # 引号
+        ("“", "标号", "左双引号（中文）", ("「", "『", '"', "[", "［")),
+        ("”", "标号", "右双引号（中文）", ("」", "』", '"', "]", "］")),
+        ("‘", "标号", "左单引号（中文）", ("'", "「")), ("’", "标号", "右单引号（中文）", ("'", "」")),
+        ("「", "标号", "左引号（日文鉤括弧）", ("“", "『", '"', "[", "［")),
+        ("」", "标号", "右引号（日文鉤括弧）", ("”", "』", '"', "]", "］")),
+        ("『", "标号", "左双层日文引号", ("「", "“")), ("』", "标号", "右双层日文引号", ("」", "”")),
+        ('"', "标号", "英文双引号", ("“", "”", "「", "」")), ("'", "标号", "英文单引号", ("‘", "’")),
+        ("｢", "标号", "半角日文左引号", ("「", "“")), ("｣", "标号", "半角日文右引号", ("」", "”")),
+        # 括号（ASCII 方括号可作为引号样式候选）
+        ("（", "标号", "左圆括号（全角）", ("(",)), ("）", "标号", "右圆括号（全角）", (")",)),
+        ("(", "标号", "左圆括号（半角）", ("（",)), (")", "标号", "右圆括号（半角）", ("）",)),
+        ("[", "标号", "左方括号/可替换为左引号", ("［", "【", "「", "“")),
+        ("]", "标号", "右方括号/可替换为右引号", ("］", "】", "」", "”")),
+        ("［", "标号", "左方括号（全角）", ("[", "【", "「", "“")),
+        ("］", "标号", "右方括号（全角）", ("]", "】", "」", "”")),
+        ("【", "标号", "左墨鱼括号", ("[", "［")), ("】", "标号", "右墨鱼括号", ("]", "］")),
+        ("{", "标号", "左花括号（半角）", ("｛",)), ("}", "标号", "右花括号（半角）", ("｝",)),
+        ("｛", "标号", "左花括号（全角）", ("{",)), ("｝", "标号", "右花括号（全角）", ("}",)),
+        # 其他标号
+        ("——", "标号", "破折号（双）", ("—", "－", "-")), ("—", "标号", "连接号/破折号（单）", ("——", "－", "-")),
+        ("－", "标号", "全角连接号", ("—", "-")), ("-", "标号", "半角连字符", ("—", "－")),
+        ("……", "标号", "双省略号", ("…", "...", "・・・・・・")), ("…", "标号", "单省略号", ("……", "...")),
+        ("《", "标号", "左书名号", ("〈",)), ("》", "标号", "右书名号", ("〉",)),
+        ("〈", "标号", "左单书名号", ("《",)), ("〉", "标号", "右单书名号", ("》",)),
+        ("·", "标号", "间隔号（中文）", ("・",)), ("・", "标号", "间隔号（日文）", ("·",)),
+        ("_", "标号", "下划线/专名号组成字符", ("＿",)), ("＿", "标号", "全角下划线", ("_",)),
+        ("/", "标号", "分隔号（半角）", ("／",)), ("／", "标号", "分隔号（全角）", ("/",)),
+        ("\\", "标号", "反斜杠（注意：RPG Maker 控制符前缀）", ("＼",)), ("＼", "标号", "全角反斜杠", ("\\",)),
     ]
-    result: list[SymbolCatalogEntry] = []
-    # fix a typographic quote in source literal defensively
-    for category, items in groups:
-        for symbol, desc, peers in items:
-            result.append(SymbolCatalogEntry(str(symbol), category, desc, tuple(str(x) for x in peers)))
-    return result
+    return [SymbolCatalogEntry(symbol, category, desc, tuple(peers)) for symbol, category, desc, peers in raw]
 
 
 def save_symbol_catalog(path: Path, entries: Sequence[SymbolCatalogEntry]) -> None:
@@ -2010,3 +2047,1493 @@ def build_ellipsis_conversion(record: DataRecord, *, direction: str, source_char
     if not replacements:
         return None
     return _replace_occurrences_reverse(record.translated, replacements)
+
+
+# ============================================================================
+# v4.2 additions: session backups, version comparison, untranslated/format
+# checks, and safe speaker/duplicate synchronization previews.
+# ============================================================================
+
+@dataclass(frozen=True)
+class TranslationGapIssue:
+    record: DataRecord
+    text_kind: str
+    reason: str
+
+@dataclass(frozen=True)
+class VersionDiffRow:
+    record: DataRecord
+    baseline_translation: str
+    current_translation: str
+    baseline_location: str
+
+@dataclass(frozen=True)
+class FormatCheckIssue:
+    record: DataRecord
+    issue_type: str
+    detail: str
+    side: str = "译文"
+
+
+def _backup_base_for_records(records: Sequence[DataRecord]) -> Path:
+    if not records:
+        raise QAError("没有可备份的数据。")
+    kind = records[0].source_kind
+    if kind == "json":
+        return records[0].translated_open_path.parent
+    if kind == "excel":
+        return Path(str(records[0].metadata.get("table_dir") or records[0].translated_open_path.parent))
+    if kind == "txt":
+        translated_dir = Path(str(records[0].metadata.get("translated_dir") or records[0].translated_open_path.parent))
+        return translated_dir.parent
+    return records[0].translated_open_path.parent
+
+
+def backup_source_snapshot(records: Sequence[DataRecord], label: str = "Manual") -> Path:
+    """Back up the current translated side once, independent of edit writes."""
+    if not records:
+        raise QAError("没有可备份的数据。")
+    kinds = {r.source_kind for r in records}
+    if len(kinds) != 1:
+        raise QAError("一次备份只能处理一种数据源。")
+    kind = next(iter(kinds))
+    root = _backup_root(_backup_base_for_records(records), label)
+    root.mkdir(parents=True, exist_ok=True)
+    if kind == "json":
+        path = records[0].translated_open_path
+        if path.exists(): shutil.copy2(path, root / path.name)
+        return root
+    if kind == "excel":
+        table_dir = Path(str(records[0].metadata.get("table_dir") or records[0].translated_open_path.parent))
+        seen: set[Path] = set()
+        for rec in records:
+            path = rec.translated_open_path
+            if path in seen or not path.exists(): continue
+            seen.add(path)
+            rel = path.relative_to(table_dir) if path.is_relative_to(table_dir) else Path(path.name)
+            dest = root / rel; dest.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(path, dest)
+        return root
+    if kind == "txt":
+        translated_dir = Path(str(records[0].metadata.get("translated_dir") or records[0].translated_open_path.parent))
+        seen: set[Path] = set()
+        for rec in records:
+            path = rec.translated_open_path
+            if path in seen or not path.exists(): continue
+            seen.add(path)
+            rel = path.relative_to(translated_dir) if path.is_relative_to(translated_dir) else Path(path.name)
+            dest = root / translated_dir.name / rel; dest.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(path, dest)
+        return root
+    raise QAError(f"不支持的数据源：{kind}")
+
+
+def _meaningful_visible(text: str) -> str:
+    value = render_rm2k3_controls(normalize_newlines(text or ""), runtime_placeholders=False)
+    return "".join(ch for ch in value if ch.isalnum() or unicodedata.category(ch).startswith("L"))
+
+
+def _source_text_kind(text: str) -> str:
+    visible = _meaningful_visible(text)
+    if not visible:
+        return "空/纯符号"
+    # Han-only means the meaningful source contains only CJK ideographs.
+    def is_han(ch: str) -> bool:
+        cp = ord(ch)
+        return (0x3400 <= cp <= 0x4DBF) or (0x4E00 <= cp <= 0x9FFF) or (0xF900 <= cp <= 0xFAFF)
+    if all(is_han(ch) for ch in visible):
+        return "全汉字"
+    letters = [ch for ch in visible if ch.isalpha()]
+    if letters and all(("A" <= ch <= "Z") or ("a" <= ch <= "z") for ch in letters) and all(ch.isascii() for ch in visible):
+        return "全英文"
+    return "其他"
+
+
+def analyze_missing_translations(records: Iterable[DataRecord], text_filter: str = "全部") -> list[TranslationGapIssue]:
+    out: list[TranslationGapIssue] = []
+    for rec in records:
+        meaningful = _meaningful_visible(rec.original)
+        if not meaningful:
+            continue
+        kind = _source_text_kind(rec.original)
+        if text_filter != "全部" and kind != text_filter:
+            continue
+        o = normalize_newlines(rec.original).strip()
+        t = normalize_newlines(rec.translated).strip()
+        ov = render_rm2k3_controls(o, runtime_placeholders=False).strip()
+        tv = render_rm2k3_controls(t, runtime_placeholders=False).strip()
+        if o == t or ov == tv:
+            out.append(TranslationGapIssue(rec, kind, "原文与译文一致，疑似未翻译"))
+    return out
+
+
+def _visible_terminal_char(text: str) -> str:
+    value = render_rm2k3_controls(normalize_newlines(text or ""), runtime_placeholders=False).rstrip()
+    # Ignore only outer closing quotes for terminal-format checks.
+    while value and value[-1] in set(OPEN_TO_CLOSE.values()):
+        value = value[:-1].rstrip()
+    return value[-1] if value else ""
+
+
+def analyze_format_checks(records: Iterable[DataRecord], include_original: bool = False) -> list[FormatCheckIssue]:
+    """Deterministic hand-review format warnings; no speaker/dictionary/duplicate semantics."""
+    issues: list[FormatCheckIssue] = []
+    for rec in records:
+        sides = [("译文", rec.translated)] + ([("原文", rec.original)] if include_original else [])
+        for side, raw in sides:
+            visible = render_rm2k3_controls(normalize_newlines(raw or ""), runtime_placeholders=False)
+            if _visible_terminal_char(raw) == ".":
+                issues.append(FormatCheckIssue(rec, "英文句号结尾", "文本以半角英文句号 . 结尾", side))
+            # Flag Japanese comma/dunhao used inside a sentence, not a terminal character.
+            stripped = visible.rstrip()
+            count_dun = sum(1 for i, ch in enumerate(stripped) if ch == "、" and i < len(stripped) - 1)
+            if count_dun:
+                issues.append(FormatCheckIssue(rec, "句中顿号", f"句中发现顿号“、” {count_dun} 处", side))
+            # Control codes are already rendered/removed; spaces here are visible text spaces.
+            ascii_spaces = visible.count(" ")
+            full_spaces = visible.count("　")
+            if ascii_spaces or full_spaces:
+                issues.append(FormatCheckIssue(rec, "空格", f"半角空格 {ascii_spaces} 个；全角空格 {full_spaces} 个", side))
+    return issues
+
+
+def compare_translation_versions(current: Sequence[DataRecord], baseline: Sequence[DataRecord]) -> list[VersionDiffRow]:
+    """Compare translations only where original text is exactly identical.
+
+    Matching first uses file_key + exact original and occurrence order within that pair.
+    This keeps repeated identical source strings reversible without guessing.
+    """
+    base_groups: dict[tuple[str, str], list[DataRecord]] = defaultdict(list)
+    for rec in baseline:
+        base_groups[(rec.file_key, rec.original)].append(rec)
+    counters: dict[tuple[str, str], int] = defaultdict(int)
+    out: list[VersionDiffRow] = []
+    for rec in current:
+        key = (rec.file_key, rec.original)
+        idx = counters[key]; counters[key] += 1
+        arr = base_groups.get(key, [])
+        if idx >= len(arr):
+            continue
+        old = arr[idx]
+        if old.translated != rec.translated:
+            out.append(VersionDiffRow(rec, old.translated, rec.translated, old.translated_location))
+    return out
+
+
+def _replace_first_literal_outside_controls(text: str, old: str, new: str) -> str | None:
+    if not old:
+        return None
+    mask = _mask_controls(text)
+    start = 0
+    while True:
+        pos = text.find(old, start)
+        if pos < 0: return None
+        if not any(mask[pos:pos+len(old)]):
+            return text[:pos] + new + text[pos+len(old):]
+        start = pos + 1
+
+
+def build_speaker_sync_change(record: DataRecord, target_name: str, pattern_mode: int = 0) -> TextChange | None:
+    """Safely replace only a detected speaker name; unstable records are skipped."""
+    source = detect_speaker(record.original, pattern_mode)
+    if not source or CONFIDENCE_RANK.get(source[2], 0) < CONFIDENCE_RANK["较确定"]:
+        return None
+    ptype = source[1]
+    translated = detect_speaker(record.translated, ptype)
+    if not translated:
+        return None
+    current_name = translated[0]
+    if not current_name or current_name == target_name:
+        return None
+    proposed = _replace_first_literal_outside_controls(record.translated, current_name, target_name)
+    if proposed is None or proposed == record.translated:
+        return None
+    return TextChange(record, f"说话人统一：{current_name} → {target_name}", proposed)
+
+
+def build_duplicate_sync_changes(group: DuplicateTextGroup, target_translation: str) -> list[TextChange]:
+    return [TextChange(r, "重复文本译文统一", target_translation) for r in group.records if r.translated != target_translation]
+
+
+# ============================================================================
+# v4.2.1 additions: selectable batch QA report, including speaker-name and
+# duplicate-translation consistency checks.
+# ============================================================================
+
+@dataclass(frozen=True)
+class BatchQAReportIssue:
+    record: DataRecord
+    issue_type: str
+    detail: str
+
+
+BATCH_QA_CHECK_LABELS = {
+    "width": "文本宽度",
+    "english_period": "英文句号结尾",
+    "dunhao": "句中顿号",
+    "spaces": "空格",
+    "quote_situation": "引号状况",
+    "quote_style": "引号样式",
+    "terminal_punctuation": "句尾符号",
+    "ellipsis": "省略号形式/数量",
+    "case_format": "英文大小写格式",
+    "width_format": "英数字全半角格式",
+    "speaker_names": "说话人译名不统一",
+    "duplicate_translations": "重复文本译文不一致",
+    "missing_translation": "疑似未翻译",
+}
+
+BATCH_QA_FORMAT_KEYS = (
+    "width", "english_period", "dunhao", "spaces", "quote_situation",
+    "quote_style", "terminal_punctuation", "ellipsis", "case_format",
+    "width_format",
+)
+
+BATCH_QA_CONTENT_KEYS = (
+    "speaker_names", "duplicate_translations", "missing_translation",
+)
+
+
+def collect_batch_qa_report_issues(
+    records: Sequence[DataRecord],
+    checks: Iterable[str],
+    face_limit: float = 19.0,
+    narration_limit: float = 25.0,
+) -> list[BatchQAReportIssue]:
+    """Collect only the user-selected QA checks for a shareable manual-review report.
+
+    Speaker-name inconsistency is defined as one detected source speaker having more
+    than one translated-name candidate. Duplicate-text inconsistency is defined as
+    an exactly identical source string having multiple translated texts.
+    """
+    chosen = set(checks)
+    rows: list[BatchQAReportIssue] = []
+
+    def add(rec: DataRecord, issue_type: str, detail: str) -> None:
+        rows.append(BatchQAReportIssue(rec, issue_type, detail))
+
+    if {"english_period", "dunhao", "spaces"} & chosen:
+        map_type = {
+            "英文句号结尾": "english_period",
+            "句中顿号": "dunhao",
+            "空格": "spaces",
+        }
+        for x in analyze_format_checks(records):
+            if map_type.get(x.issue_type) in chosen:
+                add(x.record, x.issue_type, x.detail)
+
+    if "width" in chosen:
+        for x in analyze_width(records, face_limit, narration_limit, True, True):
+            add(x.record, "文本宽度", f"第{x.line_no}行 {x.width:g} 全角单位 > {x.limit:g}（{x.face_type}）")
+
+    if {"quote_situation", "quote_style"} & chosen:
+        for x in analyze_quote_combined(records):
+            if "quote_situation" in chosen and x.situation_match == "否":
+                add(x.record, "引号状况", x.situation)
+            if "quote_style" in chosen and x.style_match == "否":
+                add(x.record, "引号样式", x.style)
+
+    if "terminal_punctuation" in chosen:
+        for x in analyze_punctuation(records, "source", "。"):
+            add(x.record, "句尾符号", x.reason)
+
+    if "ellipsis" in chosen:
+        seen_ell: set[tuple[str, str]] = set()
+        for x in analyze_ellipsis_occurrences(records, "translated"):
+            if "原文与译文" not in (x.reason or ""):
+                continue
+            key = (x.record.uid, x.reason)
+            if key in seen_ell:
+                continue
+            seen_ell.add(key)
+            add(x.record, "省略号", x.reason)
+
+    if "case_format" in chosen:
+        for rec in records:
+            if case_profile(rec.original) != "无英文" and not case_format_matches(rec.original, rec.translated):
+                add(rec, "英文大小写格式", f"{case_profile(rec.original)} / {case_profile(rec.translated).replace('原文','译文')}")
+
+    if "width_format" in chosen:
+        for rec in records:
+            if width_profile(rec.original, "both") not in {"无英数字", ""} and not width_format_matches(rec.original, rec.translated, "both"):
+                add(rec, "英数字全半角", f"{width_profile(rec.original,'both')} / {width_profile(rec.translated,'both').replace('原文','译文')}")
+
+    if "speaker_names" in chosen:
+        for group in analyze_speaker_groups(records):
+            if len(group.options) <= 1:
+                continue
+            opts = "；".join(f"{(x.translation or '<空>')} × {x.count}" for x in group.options)
+            detail = f"说话人“{group.original_name}”存在 {len(group.options)} 个译名候选：{opts}"
+            for rec in group.records:
+                add(rec, "说话人译名不统一", detail)
+
+    if "duplicate_translations" in chosen:
+        for group in analyze_duplicate_texts(records):
+            if group.consistent:
+                continue
+            opts = "；".join(f"{(text or '<空>')} × {count}" for text, count in group.translations)
+            detail = f"完全相同原文存在 {len(group.translations)} 个译文版本：{opts}"
+            for rec in group.records:
+                add(rec, "重复文本译文不一致", detail)
+
+    if "missing_translation" in chosen:
+        for x in analyze_missing_translations(records, "全部"):
+            add(x.record, "疑似未翻译", f"{x.reason}（原文类型：{x.text_kind}）")
+
+    # Deterministic de-duplication while preserving analysis order.
+    seen: set[tuple[str, str, str]] = set()
+    out: list[BatchQAReportIssue] = []
+    for x in rows:
+        key = (x.record.uid, x.issue_type, x.detail)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(x)
+    return out
+
+# ============================================================================
+# v4.3 additions: source-matched ellipsis, character-level version diff,
+# configurable untranslated-text filters, space consistency, search replace,
+# and dictionary error-alias review helpers.
+# ============================================================================
+import difflib
+
+@dataclass(frozen=True)
+class VersionDiffRow:
+    record: DataRecord
+    baseline_translation: str
+    current_translation: str
+    baseline_location: str
+    diff_summary: str = ""
+    inline_diff: str = ""
+
+@dataclass(frozen=True)
+class EllipsisMatchProposal:
+    record: DataRecord
+    eligible: bool
+    reason: str
+    proposed: str | None
+    source_segments: tuple[str, ...]
+    translated_segments: tuple[str, ...]
+    expected_segments: tuple[str, ...]
+
+@dataclass(frozen=True)
+class ErrorAlias:
+    wrong: str
+    correct: str
+    source_term: str = ""
+    source: str = "人工确认"
+
+
+ELLIPSIS_POINT_CHARS = ".．·・。"
+
+
+def _only_controls_between(value: str) -> bool:
+    """True only when the gap contains control codes and nothing visibly spacing text."""
+    if value == "":
+        return True
+    return strip_control_codes(value) == ""
+
+
+def ellipsis_occurrences_for_text(record: DataRecord, side: str, text: str) -> list[EllipsisOccurrence]:
+    """v4.3: continuous points are >=2 consecutive *identical* point characters.
+
+    The ellipsis glyph '…' is never classified as a continuous point. RPG control
+    codes may interrupt a logical run, but spaces/newlines/other visible characters end it.
+    """
+    tokens = _ellipsis_visible_stream(text)
+    if not tokens:
+        return []
+    groups: list[list[tuple[str, int, int, bool]]] = []
+    current: list[tuple[str, int, int, bool]] = []
+    prev_end = -1
+    for tok in tokens:
+        ch, start, end, interrupted = tok
+        if current:
+            prev_ch = current[-1][0]
+            between = text[prev_end:start]
+            continuation = (ch == prev_ch) and _only_controls_between(between)
+        else:
+            continuation = False
+        if continuation:
+            current.append(tok)
+        else:
+            if current:
+                groups.append(current)
+            current = [tok]
+        prev_end = end
+    if current:
+        groups.append(current)
+
+    out: list[EllipsisOccurrence] = []
+    styles_in_text: set[tuple[str, str]] = set()
+    for group in groups:
+        ch = group[0][0]
+        count = len(group)
+        interrupted = any(x[3] for x in group[1:]) or bool(CONTROL_CODE_RE.search(text[group[0][1]:group[-1][2]]))
+        if ch == "…":
+            kind = "省略号"
+            style = "…" * count
+            point_char = "…"
+        else:
+            # A single point is punctuation, not a continuous-dot/ellipsis candidate.
+            if count < 2:
+                continue
+            kind = "连续点"
+            style = ch * count
+            point_char = ch
+        styles_in_text.add((kind, point_char))
+        out.append(EllipsisOccurrence(record, side, text[group[0][1]:group[-1][2]], style, kind, point_char,
+                                      count, interrupted, group[0][1], group[-1][2]))
+    if side == "原文" and len(styles_in_text) > 1:
+        out = [EllipsisOccurrence(x.record, x.side, x.raw, x.visible_style, x.kind, x.point_char, x.count,
+                                  x.interrupted_by_control, x.start, x.end, True,
+                                  "原文包含多种省略号/连续点形式") for x in out]
+    return out
+
+
+def _ellipsis_signature(row: EllipsisOccurrence) -> tuple[str, str, int]:
+    return row.kind, row.point_char, row.count
+
+
+def analyze_ellipsis_occurrences(records: Iterable[DataRecord], side: str = "both") -> list[EllipsisOccurrence]:
+    out: list[EllipsisOccurrence] = []
+    for r in records:
+        source_rows = ellipsis_occurrences_for_text(r, "原文", r.original)
+        translated_rows = ellipsis_occurrences_for_text(r, "译文", r.translated)
+        source_styles = {(x.kind, x.point_char) for x in source_rows}
+        source_manual = len(source_styles) > 1
+        segment_mismatch = len(source_rows) != len(translated_rows)
+
+        if source_manual:
+            translated_rows = [dataclass_replace(x, manual_only=True, reason="对应原文包含多种省略号形式，只能手动处理") for x in translated_rows]
+        elif segment_mismatch:
+            reason = f"原文与译文省略号段数不一致（原文 {len(source_rows)} 段／译文 {len(translated_rows)} 段）"
+            translated_rows = [dataclass_replace(x, manual_only=True, reason=reason) for x in translated_rows]
+        else:
+            rewritten: list[EllipsisOccurrence] = []
+            for s, t in zip(source_rows, translated_rows):
+                reasons: list[str] = []
+                if (s.kind, s.point_char) != (t.kind, t.point_char):
+                    reasons.append("原文与译文省略号形式不一致")
+                if s.count != t.count:
+                    reasons.append("原文与译文省略号数量不一致")
+                rewritten.append(dataclass_replace(t, reason="；".join(reasons)))
+            translated_rows = rewritten
+
+        if side in {"original", "both"}:
+            out.extend(source_rows)
+        if side in {"translated", "both"}:
+            out.extend(translated_rows)
+    return out
+
+
+def _source_occurrence_expected(row: EllipsisOccurrence, *, group_size: int = 3,
+                                remainder: str = "删除", ellipsis_style: str = "…") -> tuple[str | None, str]:
+    if row.kind == "省略号":
+        return "…" * row.count, ""
+    if row.kind != "连续点":
+        return None, "不是可处理的省略号/连续点"
+    group_size = max(1, int(group_size))
+    if row.interrupted_by_control and group_size != 1:
+        return None, "原文连续点中夹有 RPG Maker 操作符；只有每1点转换时才能自动匹配"
+    full, rem = divmod(row.count, group_size)
+    expected = ellipsis_style * full
+    if rem and remainder == "一个省略号":
+        expected += ellipsis_style
+    return expected, ""
+
+
+def _replace_occurrence_preserve_controls(text: str, row: EllipsisOccurrence, expected: str) -> tuple[str | None, str]:
+    raw = text[row.start:row.end]
+    if not row.interrupted_by_control:
+        return text[:row.start] + expected + text[row.end:], ""
+    # With controls in the middle we may only safely preserve placement if every visible
+    # source token maps one-to-one to a single ellipsis glyph.
+    visible_count = row.count
+    if len(expected) != visible_count:
+        return None, "译文省略号片段中夹有 RPG Maker 操作符，且目标长度变化，不能安全自动处理"
+    idx = 0
+    def fn(segment: str) -> str:
+        nonlocal idx
+        chars = list(segment)
+        for i, ch in enumerate(chars):
+            if ch in ELLIPSIS_POINT_CHARS or ch == "…":
+                if idx < len(expected):
+                    chars[i] = expected[idx]
+                    idx += 1
+        return "".join(chars)
+    repl = _outside_controls_transform(raw, fn)
+    return text[:row.start] + repl + text[row.end:], ""
+
+
+def build_ellipsis_match_to_source(record: DataRecord, *, group_size: int = 3,
+                                   remainder: str = "删除", ellipsis_style: str = "…") -> EllipsisMatchProposal:
+    src = ellipsis_occurrences_for_text(record, "原文", record.original)
+    dst = ellipsis_occurrences_for_text(record, "译文", record.translated)
+    src_styles = {(x.kind, x.point_char) for x in src}
+    if not src:
+        return EllipsisMatchProposal(record, False, "原文没有可匹配的连续点/省略号", None, (), tuple(x.visible_style for x in dst), ())
+    if len(src_styles) > 1:
+        return EllipsisMatchProposal(record, False, "原文包含多种省略号/连续点形式，只能手动处理", None,
+                                     tuple(x.visible_style for x in src), tuple(x.visible_style for x in dst), ())
+    if len(src) != len(dst):
+        return EllipsisMatchProposal(record, False,
+                                     f"原文与译文省略号排序无法一一对应：原文 {len(src)} 段，译文 {len(dst)} 段",
+                                     None, tuple(x.visible_style for x in src), tuple(x.visible_style for x in dst), ())
+    expected: list[str] = []
+    for row in src:
+        value, reason = _source_occurrence_expected(row, group_size=group_size, remainder=remainder, ellipsis_style=ellipsis_style)
+        if value is None:
+            return EllipsisMatchProposal(record, False, reason, None,
+                                         tuple(x.visible_style for x in src), tuple(x.visible_style for x in dst), tuple(expected))
+        expected.append(value)
+
+    proposed = record.translated
+    # Replace from the end so offsets stay valid.
+    for row, exp in sorted(zip(dst, expected), key=lambda x: x[0].start, reverse=True):
+        replacement, reason = _replace_occurrence_preserve_controls(proposed, row, exp)
+        if replacement is None:
+            return EllipsisMatchProposal(record, False, reason, None,
+                                         tuple(x.visible_style for x in src), tuple(x.visible_style for x in dst), tuple(expected))
+        proposed = replacement
+    same = proposed == record.translated
+    reason = "已经与按原文规则转换后的省略号一致" if same else "可按原文省略号顺序一一匹配并自动修正译文"
+    return EllipsisMatchProposal(record, True, reason, proposed,
+                                 tuple(x.visible_style for x in src), tuple(x.visible_style for x in dst), tuple(expected))
+
+
+def build_ellipsis_conversion(record: DataRecord, *, direction: str, source_chars: set[str] | None = None,
+                              group_size: int = 3, remainder: str = "删除", ellipsis_style: str = "…",
+                              dot_style: str = ".", max_ellipsis: int = 2) -> str | None:
+    if direction == "根据原文匹配译文":
+        match = build_ellipsis_match_to_source(record, group_size=group_size, remainder=remainder, ellipsis_style=ellipsis_style)
+        return match.proposed if match.eligible else None
+    occs = ellipsis_occurrences_for_text(record, "译文", record.translated)
+    replacements: list[tuple[int, int, str]] = []
+    for x in occs:
+        if direction == "连续点→省略号" and x.kind == "连续点":
+            if source_chars and x.point_char not in source_chars:
+                continue
+            if x.interrupted_by_control:
+                if group_size != 1:
+                    continue
+                raw = record.translated[x.start:x.end]
+                repl = _outside_controls_transform(raw, lambda seg: "".join(ellipsis_style if ch in ELLIPSIS_POINT_CHARS else ch for ch in seg))
+                replacements.append((x.start, x.end, repl)); continue
+            full, rem = divmod(x.count, max(1, group_size))
+            repl = ellipsis_style * full
+            if rem and remainder == "一个省略号":
+                repl += ellipsis_style
+            replacements.append((x.start, x.end, repl))
+        elif direction == "省略号→连续点" and x.kind == "省略号":
+            # Every ellipsis glyph maps to X chosen point characters.
+            if x.interrupted_by_control:
+                raw = record.translated[x.start:x.end]
+                repl = _outside_controls_transform(raw, lambda seg: seg.replace("…", dot_style * max(1, group_size)))
+                replacements.append((x.start, x.end, repl)); continue
+            replacements.append((x.start, x.end, dot_style * (x.count * max(1, group_size))))
+        elif direction == "省略号压缩" and x.kind == "省略号" and x.count > max_ellipsis:
+            replacements.append((x.start, x.end, "…" * max_ellipsis))
+        elif direction == "单省略号→双省略号" and x.kind == "省略号" and x.count == 1:
+            replacements.append((x.start, x.end, "……"))
+    if not replacements:
+        return None
+    return _replace_occurrences_reverse(record.translated, replacements)
+
+
+# ---------- untranslated-text filter ----------
+
+def _is_han_char(ch: str) -> bool:
+    cp = ord(ch)
+    return (0x3400 <= cp <= 0x4DBF or 0x4E00 <= cp <= 0x9FFF or
+            0xF900 <= cp <= 0xFAFF or 0x20000 <= cp <= 0x3134F)
+
+
+def source_content_types(text: str) -> set[str]:
+    visible = render_rm2k3_controls(normalize_newlines(text or ""), runtime_placeholders=False)
+    kinds: set[str] = set()
+    for ch in visible:
+        if ch.isspace() or unicodedata.category(ch).startswith(("P", "S")):
+            continue
+        norm = unicodedata.normalize("NFKC", ch)
+        if _is_han_char(ch):
+            kinds.add("汉字")
+        elif len(norm) == 1 and ("A" <= norm <= "Z" or "a" <= norm <= "z"):
+            kinds.add("英文")
+        elif norm.isdigit():
+            kinds.add("数字")
+        else:
+            kinds.add("其它")
+    return kinds
+
+
+def analyze_missing_translations(records: Iterable[DataRecord], text_filter="全部") -> list[TranslationGapIssue]:
+    if isinstance(text_filter, str):
+        selected = {"汉字", "英文", "数字", "其它"} if text_filter in {"全部", ""} else {text_filter.replace("全", "")}
+    else:
+        selected = {str(x) for x in text_filter}
+    if not selected:
+        return []
+    out: list[TranslationGapIssue] = []
+    for rec in records:
+        kinds = source_content_types(rec.original)
+        if not kinds:  # empty or punctuation/control-only
+            continue
+        # Unchecked types mean the original must not contain that content type.
+        if not kinds.issubset(selected):
+            continue
+        o = normalize_newlines(rec.original).strip()
+        t = normalize_newlines(rec.translated).strip()
+        ov = render_rm2k3_controls(o, runtime_placeholders=False).strip()
+        tv = render_rm2k3_controls(t, runtime_placeholders=False).strip()
+        if o == t or ov == tv:
+            label = "+".join(x for x in ("汉字", "英文", "数字", "其它") if x in kinds)
+            out.append(TranslationGapIssue(rec, label, "原文与译文一致，疑似日文未翻译"))
+    return out
+
+
+# ---------- punctuation: space consistency ----------
+
+def _space_signature(text: str) -> tuple[tuple[tuple[int, int], ...], ...]:
+    visible = render_rm2k3_controls(normalize_newlines(text or ""), runtime_placeholders=False)
+    rows = []
+    for line in visible.split("\n"):
+        runs: list[tuple[int, int]] = []
+        half = full = 0
+        for ch in line:
+            if ch == " ": half += 1
+            elif ch == "　": full += 1
+        runs.append((half, full))
+        rows.append(tuple(runs))
+    return tuple(rows)
+
+
+def analyze_space_dunhao(records: Iterable[DataRecord]) -> list[FormatCheckIssue]:
+    issues: list[FormatCheckIssue] = []
+    for rec in records:
+        ovis = render_rm2k3_controls(normalize_newlines(rec.original or ""), runtime_placeholders=False)
+        tvis = render_rm2k3_controls(normalize_newlines(rec.translated or ""), runtime_placeholders=False)
+        osig = _space_signature(rec.original); tsig = _space_signature(rec.translated)
+        if osig != tsig:
+            oh, of = ovis.count(" "), ovis.count("　")
+            th, tf = tvis.count(" "), tvis.count("　")
+            issues.append(FormatCheckIssue(rec, "空格",
+                f"原文与译文空格不一致：原文半角 {oh}、全角 {of}；译文半角 {th}、全角 {tf}", "原文/译文"))
+        stripped = tvis.rstrip()
+        count_dun = sum(1 for i, ch in enumerate(stripped) if ch == "、" and i < len(stripped) - 1)
+        if count_dun:
+            issues.append(FormatCheckIssue(rec, "句中顿号", f"译文句中发现顿号“、” {count_dun} 处", "译文"))
+        if _visible_terminal_char(rec.translated) == ".":
+            issues.append(FormatCheckIssue(rec, "英文句号结尾", "译文以半角英文句号 . 结尾", "译文"))
+    return issues
+
+
+def analyze_format_checks(records: Iterable[DataRecord], include_original: bool = False) -> list[FormatCheckIssue]:
+    # v4.3: spaces are checked for source/translation consistency instead of presence.
+    return analyze_space_dunhao(records)
+
+
+# ---------- character-level version differences ----------
+
+def _line_col(text: str, pos: int) -> tuple[int, int]:
+    pos = max(0, min(len(text), pos))
+    before = text[:pos]
+    line = before.count("\n") + 1
+    col = len(before.rsplit("\n", 1)[-1]) + 1
+    return line, col
+
+
+def translation_diff_detail(old: str, new: str) -> tuple[str, str]:
+    sm = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+    details: list[str] = []
+    inline: list[str] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        a = old[i1:i2]; b = new[j1:j2]
+        if tag == "equal":
+            inline.append(a)
+            continue
+        ol, oc = _line_col(old, i1); nl, nc = _line_col(new, j1)
+        if tag == "replace":
+            details.append(f"旧译文第{ol}行第{oc}字符起：{a!r} → {b!r}")
+            inline.append(f"[-{a}-]{{+{b}+}}")
+        elif tag == "delete":
+            details.append(f"旧译文第{ol}行第{oc}字符起删除：{a!r}")
+            inline.append(f"[-{a}-]")
+        elif tag == "insert":
+            details.append(f"新译文第{nl}行第{nc}字符前新增：{b!r}")
+            inline.append(f"{{+{b}+}}")
+    return "；".join(details), "".join(inline)
+
+
+def compare_translation_versions(current: Sequence[DataRecord], baseline: Sequence[DataRecord]) -> list[VersionDiffRow]:
+    base_groups: dict[tuple[str, str], list[DataRecord]] = defaultdict(list)
+    for rec in baseline:
+        base_groups[(rec.file_key, rec.original)].append(rec)
+    counters: dict[tuple[str, str], int] = defaultdict(int)
+    out: list[VersionDiffRow] = []
+    for rec in current:
+        key = (rec.file_key, rec.original)
+        idx = counters[key]; counters[key] += 1
+        arr = base_groups.get(key, [])
+        if idx >= len(arr):
+            continue
+        old = arr[idx]
+        if old.translated != rec.translated:
+            detail, inline = translation_diff_detail(old.translated, rec.translated)
+            out.append(VersionDiffRow(rec, old.translated, rec.translated, old.translated_location, detail, inline))
+    return out
+
+
+# ---------- search-page translation replacement ----------
+
+def replace_literal_outside_controls(text: str, old: str, new: str, *, case_sensitive: bool = True) -> str:
+    if not old:
+        return text
+    if case_sensitive:
+        return _outside_controls_transform(text, lambda seg: seg.replace(old, new))
+    pattern = re.compile(re.escape(old), re.I)
+    return _outside_controls_transform(text, lambda seg: pattern.sub(new, seg))
+
+
+def build_text_replacement_changes(records: Iterable[DataRecord], old: str, new: str, *,
+                                   source_exclude: str = "", full_exclude: str = "",
+                                   case_sensitive: bool = True) -> list[TextChange]:
+    if not old:
+        raise QAError("替换查找词不能为空。")
+    changes: list[TextChange] = []
+    for rec in records:
+        if source_exclude and source_exclude in rec.original:
+            continue
+        if full_exclude and (full_exclude in rec.original or full_exclude in rec.translated):
+            continue
+        proposed = replace_literal_outside_controls(rec.translated, old, new, case_sensitive=case_sensitive)
+        if proposed != rec.translated:
+            changes.append(TextChange(rec, f"文本替换：{old} → {new}", proposed))
+    return changes
+
+
+# ---------- dictionary review / wrong-translation aliases ----------
+
+def _alias_map(aliases: Sequence[ErrorAlias]) -> dict[str, ErrorAlias]:
+    # Last edit wins for an identical wrong form; longest-match ordering happens later.
+    result: dict[str, ErrorAlias] = {}
+    for x in aliases:
+        if x.wrong and x.correct and x.wrong != x.correct:
+            result[x.wrong] = x
+    return result
+
+
+def replace_error_aliases(text: str, aliases: Sequence[ErrorAlias]) -> tuple[str, tuple[str, ...]]:
+    mapping = _alias_map(aliases)
+    if not mapping:
+        return text, ()
+    keys = sorted(mapping, key=lambda x: (-len(x), x))
+    pattern = re.compile("|".join(re.escape(x) for x in keys))
+    used: list[str] = []
+    def fn(segment: str) -> str:
+        def repl(m):
+            wrong = m.group(0); used.append(wrong); return mapping[wrong].correct
+        return pattern.sub(repl, segment)
+    proposed = _outside_controls_transform(text, fn)
+    return proposed, tuple(dict.fromkeys(used))
+
+
+def build_error_alias_changes(records: Iterable[DataRecord], aliases: Sequence[ErrorAlias]) -> list[TextChange]:
+    out: list[TextChange] = []
+    for rec in records:
+        proposed, used = replace_error_aliases(rec.translated, aliases)
+        if proposed != rec.translated:
+            out.append(TextChange(rec, "错误译名自动替换：" + "、".join(used), proposed))
+    return out
+
+
+# ---------- v4.3 batch report collector ----------
+def collect_batch_qa_report_issues(
+    records: Sequence[DataRecord], checks: Iterable[str], face_limit: float = 19.0,
+    narration_limit: float = 25.0,
+) -> list[BatchQAReportIssue]:
+    chosen = set(checks); rows: list[BatchQAReportIssue] = []
+    def add(rec, typ, detail): rows.append(BatchQAReportIssue(rec, typ, detail))
+
+    if {"english_period", "dunhao", "spaces"} & chosen:
+        mapping = {"英文句号结尾":"english_period", "句中顿号":"dunhao", "空格":"spaces"}
+        for x in analyze_space_dunhao(records):
+            if mapping.get(x.issue_type) in chosen: add(x.record, x.issue_type, x.detail)
+    if "width" in chosen:
+        for x in analyze_width(records, face_limit, narration_limit, True, True):
+            add(x.record, "文本宽度", f"第{x.line_no}行 {x.width:g} 全角单位 > {x.limit:g}（{x.face_type}）")
+    if {"quote_situation", "quote_style"} & chosen:
+        for x in analyze_quote_combined(records):
+            if "quote_situation" in chosen and x.situation_match == "否": add(x.record, "引号状况", x.situation)
+            if "quote_style" in chosen and x.style_match == "否": add(x.record, "引号样式", x.style)
+    if "terminal_punctuation" in chosen:
+        for x in analyze_punctuation(records, "source", "。"): add(x.record, "句尾符号", x.reason)
+    if "ellipsis" in chosen:
+        for rec in records:
+            m = build_ellipsis_match_to_source(rec)
+            if m.source_segments and (not m.eligible or (m.proposed is not None and m.proposed != rec.translated)):
+                add(rec, "省略号", m.reason)
+    if "case_format" in chosen:
+        for rec in records:
+            if case_profile(rec.original) != "无英文" and not case_format_matches(rec.original, rec.translated):
+                add(rec, "英文大小写格式", f"{case_profile(rec.original)} / {case_profile(rec.translated).replace('原文','译文')}")
+    if "width_format" in chosen:
+        for rec in records:
+            if width_profile(rec.original, "both") not in {"无英数字", ""} and not width_format_matches(rec.original, rec.translated, "both"):
+                add(rec, "英数字全半角", f"{width_profile(rec.original,'both')} / {width_profile(rec.translated,'both').replace('原文','译文')}")
+    if "speaker_names" in chosen:
+        for group in analyze_speaker_groups(records):
+            if len(group.options) <= 1: continue
+            opts = "；".join(f"{(x.translation or '<空>')} × {x.count}" for x in group.options)
+            detail = f"说话人“{group.original_name}”存在 {len(group.options)} 个译名候选：{opts}"
+            for rec in group.records: add(rec, "说话人译名不统一", detail)
+    if "duplicate_translations" in chosen:
+        for group in analyze_duplicate_texts(records):
+            if group.consistent: continue
+            opts = "；".join(f"{(text or '<空>')} × {count}" for text, count in group.translations)
+            for rec in group.records: add(rec, "重复文本译文不一致", f"完全相同原文存在 {len(group.translations)} 个译文版本：{opts}")
+    if "missing_translation" in chosen:
+        for x in analyze_missing_translations(records, {"汉字","英文","数字","其它"}):
+            add(x.record, "疑似未翻译", f"{x.reason}（原文类型：{x.text_kind}）")
+    seen=set(); out=[]
+    for x in rows:
+        key=(x.record.uid,x.issue_type,x.detail)
+        if key in seen: continue
+        seen.add(key); out.append(x)
+    return out
+
+# ============================================================================
+# v4.4 additions: safer alias replacement, font-aware logical width baseline,
+# database-name dictionary extraction, and reusable error-alias persistence.
+# ============================================================================
+
+ERROR_ALIAS_HEADERS = {
+    "wrong": {"错误译名", "wrong", "erroralias", "error_alias"},
+    "correct": {"正确译名", "correct", "translation", "translated"},
+    "source_term": {"对应辞典原词", "辞典原词", "source_term", "originalterm"},
+    "source": {"来源", "source"},
+}
+
+
+def logical_fullwidth_units(text: str, ambiguous_unit: float = 0.5) -> float:
+    """Return logical fullwidth units after RM2k/2k3 controls are rendered/hidden.
+
+    W/F characters count as 1 fullwidth unit; Na/H/N count as 0.5. East Asian
+    Ambiguous characters (for example U+00B7 MIDDLE DOT) are configurable and
+    default to 0.5 because their *actual* width depends on the selected font.
+    The UI's pixel preview is the authoritative visual check for such glyphs.
+    """
+    total = 0.0
+    ambiguous_unit = max(0.0, float(ambiguous_unit))
+    for char in text or "":
+        if char in "\r\n":
+            continue
+        category = unicodedata.category(char)
+        if category in {"Mn", "Me", "Cf", "Cc"}:
+            continue
+        if char == "\t":
+            total += 2.0
+            continue
+        eaw = unicodedata.east_asian_width(char)
+        if eaw in {"W", "F"}:
+            total += 1.0
+        elif eaw == "A":
+            total += ambiguous_unit
+        else:
+            total += 0.5
+    return total
+
+
+def analyze_width(records: Iterable[DataRecord], face_limit: float, narration_limit: float,
+                  check_face: bool, check_narration: bool, ambiguous_unit: float = 0.5) -> list[WidthIssue]:
+    """v4.4 width analysis.
+
+    RM2k/2k3 timing/style controls such as ``\\.`` do not consume logical width.
+    Static special-character controls are rendered to the glyph they produce. This
+    keeps the logical count aligned with the separate current-font pixel preview.
+    """
+    issues: list[WidthIssue] = []
+    for r in records:
+        if r.marker != "Message":
+            continue
+        if is_face_message(r):
+            if not check_face:
+                continue
+            limit, face_type = face_limit, "有头像"
+        elif is_narration_message(r):
+            if not check_narration:
+                continue
+            limit, face_type = narration_limit, "无头像"
+        else:
+            continue
+        for i, line in enumerate(normalize_newlines(r.translated).split("\n"), 1):
+            vis = render_rm2k3_controls(line, runtime_placeholders=False)
+            width = logical_fullwidth_units(vis, ambiguous_unit=ambiguous_unit)
+            if width > limit:
+                issues.append(WidthIssue(r, i, width, limit, face_type, vis))
+    return issues
+
+
+def _protected_correct_spans(segment: str, aliases: Sequence[ErrorAlias]) -> list[tuple[int, int]]:
+    """Ranges already containing a known correct translation.
+
+    A shorter error alias must never be expanded inside a correct translation. For
+    example ``当前理智`` -> ``当前理智度`` must not turn an already correct
+    ``当前理智度`` into ``当前理智度度``.
+    """
+    spans: list[tuple[int, int]] = []
+    correct_values = sorted({x.correct for x in aliases if x.correct}, key=lambda s: (-len(s), s))
+    for value in correct_values:
+        start = 0
+        while True:
+            pos = segment.find(value, start)
+            if pos < 0:
+                break
+            spans.append((pos, pos + len(value)))
+            start = pos + max(1, len(value))
+    spans.sort()
+    return spans
+
+
+def _span_is_protected(start: int, end: int, spans: Sequence[tuple[int, int]]) -> bool:
+    return any(start >= a and end <= b for a, b in spans)
+
+
+def replace_error_aliases(text: str, aliases: Sequence[ErrorAlias]) -> tuple[str, tuple[str, ...]]:
+    """Replace known wrong translations, longest first, without touching correct text.
+
+    Correct forms are protected before matching wrong forms. This solves both
+    short/long alias overlap and the classic ``瓦特莉`` -> ``瓦特莉莉`` class of
+    accidental second replacement.
+    """
+    mapping = _alias_map(aliases)
+    if not mapping:
+        return text, ()
+    ordered_aliases = sorted(mapping.values(), key=lambda x: (-len(x.wrong), x.wrong))
+    keys = [x.wrong for x in ordered_aliases]
+    pattern = re.compile("|".join(re.escape(x) for x in keys))
+    used: list[str] = []
+
+    def fn(segment: str) -> str:
+        protected = _protected_correct_spans(segment, ordered_aliases)
+        parts: list[str] = []
+        cursor = 0
+        for m in pattern.finditer(segment):
+            if _span_is_protected(m.start(), m.end(), protected):
+                continue
+            wrong = m.group(0)
+            parts.append(segment[cursor:m.start()])
+            parts.append(mapping[wrong].correct)
+            used.append(wrong)
+            cursor = m.end()
+        parts.append(segment[cursor:])
+        return "".join(parts)
+
+    proposed = _outside_controls_transform(text, fn)
+    return proposed, tuple(dict.fromkeys(used))
+
+
+def build_error_alias_changes(records: Iterable[DataRecord], aliases: Sequence[ErrorAlias]) -> list[TextChange]:
+    out: list[TextChange] = []
+    for rec in records:
+        proposed, used = replace_error_aliases(rec.translated, aliases)
+        if proposed != rec.translated:
+            out.append(TextChange(rec, "错误译名自动替换：" + "、".join(used), proposed))
+    return out
+
+
+def warning_is_covered_by_alias(warning: DictionaryWarning, aliases: Sequence[ErrorAlias]) -> bool:
+    """Whether an existing warning is now managed by the automatic alias stage."""
+    proposed, used = replace_error_aliases(warning.record.translated, aliases)
+    return bool(used and proposed != warning.record.translated)
+
+
+def extract_database_dictionary_rows(records: Iterable[DataRecord], include_items: bool = True,
+                                     include_monsters: bool = True, include_skills: bool = True) -> list[EditableDictionaryRow]:
+    """Extract only database *names* (not descriptions/messages) for dictionary use."""
+    wanted: dict[str, tuple[bool, str]] = {
+        "items.txt": (include_items, "物品"),
+        "monsters.txt": (include_monsters, "怪物"),
+        "skills.txt": (include_skills, "技能"),
+    }
+    rows: list[EditableDictionaryRow] = []
+    seen: set[tuple[str, str, str]] = set()
+    for rec in records:
+        leaf = PureWindowsPath(rec.file_key).name.lower()
+        enabled, category = wanted.get(leaf, (False, ""))
+        if not enabled or rec.marker.lower() != "name":
+            continue
+        if not rec.original.strip():
+            continue
+        key = (rec.original, rec.translated, category)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(EditableDictionaryRow(rec.original, rec.translated, category, f"数据库名称:{PureWindowsPath(rec.file_key).name}"))
+    return rows
+
+
+def _alias_header_index(headers: Sequence[object], key: str) -> int | None:
+    normalized = [_normalize_header(x) for x in headers]
+    aliases = {_normalize_header(x) for x in ERROR_ALIAS_HEADERS[key]}
+    for i, value in enumerate(normalized):
+        if value in aliases:
+            return i
+    return None
+
+
+def load_error_aliases(path: Path) -> list[ErrorAlias]:
+    path = Path(path)
+    rows: list[list[object]] = []
+    if path.suffix.lower() == ".csv":
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            rows = [list(x) for x in csv.reader(f)]
+    elif path.suffix.lower() in {".xlsx", ".xlsm"}:
+        wb = load_workbook(path, read_only=True, data_only=False)
+        try:
+            ws = wb[wb.sheetnames[0]]
+            rows = [list(x) for x in ws.iter_rows(values_only=True)]
+        finally:
+            wb.close()
+    else:
+        raise QAError("错误译名表仅支持 CSV/XLSX/XLSM。")
+    if not rows:
+        return []
+    headers = rows[0]
+    iw = _alias_header_index(headers, "wrong"); ic = _alias_header_index(headers, "correct")
+    if iw is None or ic is None:
+        raise QAError("错误译名表必须包含“错误译名”和“正确译名”列。")
+    it = _alias_header_index(headers, "source_term"); isrc = _alias_header_index(headers, "source")
+    result: list[ErrorAlias] = []
+    for row in rows[1:]:
+        wrong = str(row[iw] or "").strip() if iw < len(row) else ""
+        correct = str(row[ic] or "").strip() if ic < len(row) else ""
+        if not wrong or not correct or wrong == correct:
+            continue
+        source_term = str(row[it] or "").strip() if it is not None and it < len(row) else ""
+        source = str(row[isrc] or "").strip() if isrc is not None and isrc < len(row) else path.name
+        result.append(ErrorAlias(wrong, correct, source_term, source or path.name))
+    # Later row wins for the same wrong form, preserving the user's latest edit.
+    dedup: dict[str, ErrorAlias] = {}
+    for x in result:
+        dedup[x.wrong] = x
+    return list(dedup.values())
+
+
+def save_error_aliases(path: Path, aliases: Sequence[ErrorAlias]) -> None:
+    path = Path(path)
+    rows = [[x.wrong, x.correct, x.source_term, x.source] for x in aliases]
+    headers = ["错误译名", "正确译名", "对应辞典原词", "来源"]
+    if path.suffix.lower() == ".csv":
+        with path.open("w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f); w.writerow(headers); w.writerows(rows)
+    elif path.suffix.lower() in {".xlsx", ".xlsm"}:
+        wb = Workbook(); ws = wb.active; ws.title = "ErrorAliases"; ws.append(headers)
+        for row in rows:
+            ws.append(row)
+        ws.freeze_panes = "A2"; ws.auto_filter.ref = ws.dimensions
+        ws.column_dimensions["A"].width = 28; ws.column_dimensions["B"].width = 28
+        ws.column_dimensions["C"].width = 28; ws.column_dimensions["D"].width = 24
+        wb.save(path); wb.close()
+    else:
+        raise QAError("错误译名表仅支持 CSV/XLSX/XLSM。")
+
+
+def wrap_text_by_units(text: str, limit: float, ambiguous_unit: float = 0.5) -> str:
+    """Preview-only wrapping using the v4.4 logical width model.
+
+    Control codes are kept verbatim and contribute zero width unless they render a
+    static glyph. Newlines are respected. This is a preview helper only.
+    """
+    limit = max(0.5, float(limit))
+    out_lines: list[str] = []
+    for raw_line in normalize_newlines(text or "").split("\n"):
+        current: list[str] = []
+        current_units = 0.0
+        for is_control, segment in split_preserving_controls(raw_line):
+            if is_control:
+                current.append(segment)
+                rendered = render_rm2k3_controls(segment, runtime_placeholders=False)
+                current_units += logical_fullwidth_units(rendered, ambiguous_unit)
+                continue
+            for ch in segment:
+                w = logical_fullwidth_units(ch, ambiguous_unit)
+                if current and current_units + w > limit:
+                    out_lines.append("".join(current)); current = []; current_units = 0.0
+                current.append(ch); current_units += w
+        out_lines.append("".join(current))
+    return "\n".join(out_lines)
+
+# v4.4 expands the standard editable dictionary categories.
+DICT_CATEGORIES = ["人名", "地名", "物品", "怪物", "技能", "术语", "其他"]
+
+
+def warning_is_covered_by_alias(warning: DictionaryWarning, aliases: Sequence[ErrorAlias]) -> bool:
+    """True when the warning's own dictionary term is now handled by an alias.
+
+    Aliases belonging to unrelated dictionary terms in the same sentence must not
+    accidentally remove this warning from the manual-review queue.
+    """
+    relevant = [a for a in aliases if not a.source_term or a.source_term == warning.original_term or a.source_term == "（二次确认）"]
+    if not relevant:
+        return False
+    proposed, used = replace_error_aliases(warning.record.translated, relevant)
+    return bool(used and proposed != warning.record.translated)
+
+# ============================================================================
+# v4.5 additions: independent punctuation diagnostics and source-constrained
+# wrong-translation aliases.
+# ============================================================================
+
+@dataclass(frozen=True)
+class EnglishPeriodIssue:
+    record: DataRecord
+    source_terminal: str
+    source_kind: str
+    translated_terminal: str = "."
+
+
+@dataclass(frozen=True)
+class DunhaoUsageIssue:
+    record: DataRecord
+    total_count: int
+    line_end_count: int
+    stutter_count: int
+    multiple: bool
+    other: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class SpaceStructureIssue:
+    record: DataRecord
+    category: str
+    lines: tuple[int, ...]
+    detail: str
+    auto_mode: str = ""
+    proposed: str | None = None
+
+
+def _combined_control_mask(text: str) -> list[bool]:
+    value = text or ""
+    mask = [False] * len(value)
+    for regex in (RM2K3_CONTROL_RE, CONTROL_CODE_RE):
+        for m in regex.finditer(value):
+            for i in range(m.start(), m.end()):
+                if 0 <= i < len(mask):
+                    mask[i] = True
+    return mask
+
+
+def _visible_line_terminal(text: str) -> str:
+    return _visible_terminal_char(text)
+
+
+def analyze_english_period_endings(records: Iterable[DataRecord]) -> list[EnglishPeriodIssue]:
+    """Find suspicious translated English-period endings.
+
+    A source that also ends in an English period is considered normal and is
+    deliberately omitted. The source ending is classified so the UI can select
+    source-not-period or source-Chinese-period cases quickly.
+    """
+    out: list[EnglishPeriodIssue] = []
+    for rec in records:
+        t = _visible_line_terminal(rec.translated)
+        if t != ".":
+            continue
+        s = _visible_line_terminal(rec.original)
+        if s == ".":
+            continue
+        source_kind = "中文句号" if s == "。" else "其他/无句号"
+        out.append(EnglishPeriodIssue(rec, s, source_kind))
+    return out
+
+
+def replace_terminal_english_period(text: str, replacement: str = "。") -> str:
+    """Replace the final visible English period, preserving trailing controls/quotes."""
+    value = text or ""
+    mask = _combined_control_mask(value)
+    closing = set(OPEN_TO_CLOSE.values())
+    i = len(value) - 1
+    while i >= 0:
+        if mask[i] or value[i].isspace() or value[i] in closing:
+            i -= 1
+            continue
+        break
+    if i >= 0 and value[i] == "." and not mask[i]:
+        return value[:i] + replacement + value[i + 1:]
+    return value
+
+
+def analyze_dunhao_usage(records: Iterable[DataRecord]) -> list[DunhaoUsageIssue]:
+    out: list[DunhaoUsageIssue] = []
+    for rec in records:
+        visible = punctuation_text(rec.translated)
+        total = visible.count("、")
+        if not total:
+            continue
+        line_end = 0
+        stutter = 0
+        for line in normalize_newlines(visible).split("\n"):
+            positions = [i for i, ch in enumerate(line) if ch == "、"]
+            for pos in positions:
+                if not line[pos + 1:].strip():
+                    line_end += 1
+                left = pos - 1
+                while left >= 0 and line[left].isspace():
+                    left -= 1
+                right = pos + 1
+                while right < len(line) and line[right].isspace():
+                    right += 1
+                if left >= 0 and right < len(line) and line[left] == line[right]:
+                    stutter += 1
+        multiple = total >= 2
+        other = (not multiple) and line_end == 0 and stutter == 0
+        labels = []
+        if line_end: labels.append(f"行尾 {line_end}")
+        if stutter: labels.append(f"前后同字 {stutter}")
+        if multiple: labels.append(f"多个顿号 {total}")
+        if other: labels.append("其他")
+        out.append(DunhaoUsageIssue(rec, total, line_end, stutter, multiple, other, "；".join(labels)))
+    return out
+
+
+def replace_dunhao_all(text: str, replacement: str = "，") -> str:
+    return _outside_controls_transform(text or "", lambda seg: seg.replace("、", replacement))
+
+
+def _replace_line_end_dunhao_in_line(line: str, replacement: str) -> str:
+    if not line:
+        return line
+    mask = _combined_control_mask(line)
+    visible_positions = [i for i, ch in enumerate(line) if not mask[i] and not ch.isspace()]
+    if not visible_positions:
+        return line
+    pos = visible_positions[-1]
+    if line[pos] != "、":
+        return line
+    return line[:pos] + replacement + line[pos + 1:]
+
+
+def replace_dunhao_line_end(text: str, replacement: str = "，") -> str:
+    return "\n".join(_replace_line_end_dunhao_in_line(line, replacement)
+                      for line in normalize_newlines(text or "").split("\n"))
+
+
+def _line_space_parts(line: str) -> tuple[str, str, str]:
+    """Return visible leading, internal and trailing spaces, ignoring controls."""
+    mask = _combined_control_mask(line)
+    nonspace = [i for i, ch in enumerate(line) if not mask[i] and not ch.isspace()]
+    if not nonspace:
+        spaces = "".join(ch for i, ch in enumerate(line) if not mask[i] and ch in {" ", "　"})
+        return spaces, "", ""
+    first, last = nonspace[0], nonspace[-1]
+    leading = "".join(ch for i, ch in enumerate(line[:first]) if not mask[i] and ch in {" ", "　"})
+    internal = "".join(ch for i, ch in enumerate(line[first:last + 1], start=first) if not mask[i] and ch in {" ", "　"})
+    trailing = "".join(ch for i, ch in enumerate(line[last + 1:], start=last + 1) if not mask[i] and ch in {" ", "　"})
+    return leading, internal, trailing
+
+
+def _insert_missing_leading_spaces(line: str, desired: str) -> tuple[str, bool]:
+    mask = _combined_control_mask(line)
+    nonspace = [i for i, ch in enumerate(line) if not mask[i] and not ch.isspace()]
+    if not nonspace:
+        return line, False
+    first = nonspace[0]
+    current = "".join(ch for i, ch in enumerate(line[:first]) if not mask[i] and ch in {" ", "　"})
+    if current == desired:
+        return line, False
+    # '补齐' is intentionally conservative: only add a missing suffix of the
+    # same source leading-space pattern. Different/extra spaces remain manual.
+    if not desired.startswith(current):
+        return line, False
+    missing = desired[len(current):]
+    if not missing:
+        return line, False
+    return line[:first] + missing + line[first:], True
+
+
+def sync_missing_source_leading_spaces(record: DataRecord) -> str | None:
+    olines = normalize_newlines(record.original).split("\n")
+    tlines = normalize_newlines(record.translated).split("\n")
+    if len(tlines) < len(olines):
+        return None
+    changed = False
+    for i in range(min(len(olines), len(tlines))):
+        source_leading, _si, _st = _line_space_parts(olines[i])
+        if not source_leading:
+            continue
+        new_line, did = _insert_missing_leading_spaces(tlines[i], source_leading)
+        if did:
+            tlines[i] = new_line; changed = True
+    return "\n".join(tlines) if changed else None
+
+
+def _strip_trailing_visible_spaces(line: str) -> tuple[str, bool]:
+    if not line:
+        return line, False
+    mask = _combined_control_mask(line)
+    nonspace = [i for i, ch in enumerate(line) if not mask[i] and not ch.isspace()]
+    if not nonspace:
+        return line, False
+    last = nonspace[-1]
+    remove = {i for i, ch in enumerate(line) if i > last and not mask[i] and ch in {" ", "　"}}
+    if not remove:
+        return line, False
+    return "".join(ch for i, ch in enumerate(line) if i not in remove), True
+
+
+def remove_translation_trailing_spaces(record: DataRecord, preserve_when_source_has_trailing: bool = True) -> str | None:
+    olines = normalize_newlines(record.original).split("\n")
+    tlines = normalize_newlines(record.translated).split("\n")
+    changed = False
+    for i, line in enumerate(tlines):
+        _tl, _ti, trailing = _line_space_parts(line)
+        if not trailing:
+            continue
+        if preserve_when_source_has_trailing and i < len(olines):
+            _ol, _oi, source_trailing = _line_space_parts(olines[i])
+            if source_trailing:
+                continue
+        new_line, did = _strip_trailing_visible_spaces(line)
+        if did:
+            tlines[i] = new_line; changed = True
+    return "\n".join(tlines) if changed else None
+
+
+def analyze_space_structure(records: Iterable[DataRecord], include_all_with_spaces: bool = False,
+                            preserve_source_trailing: bool = True) -> list[SpaceStructureIssue]:
+    out: list[SpaceStructureIssue] = []
+    for rec in records:
+        olines = normalize_newlines(rec.original).split("\n")
+        tlines = normalize_newlines(rec.translated).split("\n")
+        max_lines = max(len(olines), len(tlines))
+        lead_lines: list[int] = []
+        trailing_lines: list[int] = []
+        internal_lines: list[int] = []
+        any_spaces = False
+        for i in range(max_lines):
+            oline = olines[i] if i < len(olines) else ""
+            tline = tlines[i] if i < len(tlines) else ""
+            ol, oi, ot = _line_space_parts(oline)
+            tl, ti, tt = _line_space_parts(tline)
+            if ol or oi or ot or tl or ti or tt:
+                any_spaces = True
+            if ol and ol != tl:
+                lead_lines.append(i + 1)
+            if tt:
+                if not (preserve_source_trailing and ot):
+                    trailing_lines.append(i + 1)
+            if oi != ti:
+                internal_lines.append(i + 1)
+        if lead_lines:
+            proposal = sync_missing_source_leading_spaces(rec)
+            out.append(SpaceStructureIssue(rec, "原文行首空格", tuple(lead_lines),
+                "原文行首存在用于对齐的空格，而译文同一行未完全补齐。", "补齐原文行首空格" if proposal else "", proposal))
+        if trailing_lines:
+            proposal = remove_translation_trailing_spaces(rec, preserve_when_source_has_trailing=preserve_source_trailing)
+            out.append(SpaceStructureIssue(rec, "译文行尾空格", tuple(trailing_lines),
+                "译文一行末尾存在空格。", "删除译文行尾空格" if proposal else "", proposal))
+        if internal_lines:
+            out.append(SpaceStructureIssue(rec, "文本中间空格不一致", tuple(internal_lines),
+                "原文与译文对应行的文本中间空格数量/全半角形式不一致，只建议手动处理。"))
+        if include_all_with_spaces and any_spaces:
+            out.append(SpaceStructureIssue(rec, "所有含空格文本", (), "原文或译文含有可见空格，供浏览全文空格使用。"))
+    return out
+
+
+def _valid_alias_source_term(alias: ErrorAlias) -> bool:
+    term = (alias.source_term or "").strip()
+    return bool(term and not (term.startswith("（") and term.endswith("）")))
+
+
+def aliases_for_record(record: DataRecord, aliases: Sequence[ErrorAlias]) -> list[ErrorAlias]:
+    """Only aliases whose dictionary source term actually occurs in this source text.
+
+    This is the v4.5 safety boundary: a wrong translated word is never replaced in
+    a sentence whose original does not contain the dictionary term it belongs to.
+    """
+    return [a for a in aliases if _valid_alias_source_term(a) and a.source_term in record.original]
+
+
+def replace_error_aliases_for_record(record: DataRecord, aliases: Sequence[ErrorAlias]) -> tuple[str, tuple[str, ...]]:
+    return replace_error_aliases(record.translated, aliases_for_record(record, aliases))
+
+
+def build_error_alias_changes(records: Iterable[DataRecord], aliases: Sequence[ErrorAlias]) -> list[TextChange]:
+    out: list[TextChange] = []
+    for rec in records:
+        proposed, used = replace_error_aliases_for_record(rec, aliases)
+        if proposed != rec.translated:
+            out.append(TextChange(rec, "错误译名自动替换：" + "、".join(used), proposed))
+    return out
+
+
+def warning_is_covered_by_alias(warning: DictionaryWarning, aliases: Sequence[ErrorAlias]) -> bool:
+    relevant = [a for a in aliases if _valid_alias_source_term(a)
+                and a.source_term == warning.original_term
+                and a.source_term in warning.record.original]
+    if not relevant:
+        return False
+    proposed, used = replace_error_aliases(warning.record.translated, relevant)
+    return bool(used and proposed != warning.record.translated)
+
+# v4.5 batch report collector follows the same independent punctuation rules
+# as the interactive tabs.
+def collect_batch_qa_report_issues(
+    records: Sequence[DataRecord], checks: Iterable[str], face_limit: float = 19.0,
+    narration_limit: float = 25.0,
+) -> list[BatchQAReportIssue]:
+    chosen = set(checks); rows: list[BatchQAReportIssue] = []
+    def add(rec, typ, detail): rows.append(BatchQAReportIssue(rec, typ, detail))
+
+    if "english_period" in chosen:
+        for x in analyze_english_period_endings(records):
+            add(x.record, "英文句号结尾", f"译文以 . 结尾；原文末符为 {x.source_terminal or '无'}（{x.source_kind}）")
+    if "dunhao" in chosen:
+        for x in analyze_dunhao_usage(records):
+            add(x.record, "句中顿号", x.detail)
+    if "spaces" in chosen:
+        for x in analyze_space_structure(records, include_all_with_spaces=False):
+            add(x.record, "空格", f"{x.category}：{x.detail}" + (f"（行 {','.join(map(str,x.lines))}）" if x.lines else ""))
+    if "width" in chosen:
+        for x in analyze_width(records, face_limit, narration_limit, True, True):
+            add(x.record, "文本宽度", f"第{x.line_no}行 {x.width:g} 全角单位 > {x.limit:g}（{x.face_type}）")
+    if {"quote_situation", "quote_style"} & chosen:
+        for x in analyze_quote_combined(records):
+            if "quote_situation" in chosen and x.situation_match == "否": add(x.record, "引号状况", x.situation)
+            if "quote_style" in chosen and x.style_match == "否": add(x.record, "引号样式", x.style)
+    if "terminal_punctuation" in chosen:
+        for x in analyze_punctuation(records, "source", "。"): add(x.record, "句尾符号", x.reason)
+    if "ellipsis" in chosen:
+        for rec in records:
+            m = build_ellipsis_match_to_source(rec)
+            if m.source_segments and (not m.eligible or (m.proposed is not None and m.proposed != rec.translated)):
+                add(rec, "省略号", m.reason)
+    if "case_format" in chosen:
+        for rec in records:
+            if case_profile(rec.original) != "无英文" and not case_format_matches(rec.original, rec.translated):
+                add(rec, "英文大小写格式", f"{case_profile(rec.original)} / {case_profile(rec.translated).replace('原文','译文')}")
+    if "width_format" in chosen:
+        for rec in records:
+            if width_profile(rec.original, "both") not in {"无英数字", ""} and not width_format_matches(rec.original, rec.translated, "both"):
+                add(rec, "英数字全半角", f"{width_profile(rec.original,'both')} / {width_profile(rec.translated,'both').replace('原文','译文')}")
+    if "speaker_names" in chosen:
+        for group in analyze_speaker_groups(records):
+            if len(group.options) <= 1: continue
+            opts = "；".join(f"{(x.translation or '<空>')} × {x.count}" for x in group.options)
+            detail = f"说话人“{group.original_name}”存在 {len(group.options)} 个译名候选：{opts}"
+            for rec in group.records: add(rec, "说话人译名不统一", detail)
+    if "duplicate_translations" in chosen:
+        for group in analyze_duplicate_texts(records):
+            if group.consistent: continue
+            opts = "；".join(f"{(text or '<空>')} × {count}" for text, count in group.translations)
+            for rec in group.records: add(rec, "重复文本译文不一致", f"完全相同原文存在 {len(group.translations)} 个译文版本：{opts}")
+    if "missing_translation" in chosen:
+        for x in analyze_missing_translations(records, {"汉字","英文","数字","其它"}):
+            add(x.record, "疑似未翻译", f"{x.reason}（原文类型：{x.text_kind}）")
+    seen=set(); out=[]
+    for x in rows:
+        key=(x.record.uid,x.issue_type,x.detail)
+        if key in seen: continue
+        seen.add(key); out.append(x)
+    return out

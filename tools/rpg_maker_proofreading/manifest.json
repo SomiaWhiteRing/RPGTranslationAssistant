@@ -3,7 +3,7 @@
   "id": "rpg_maker_proofreading",
   "category": "gui",
   "name": "RPG 制作大师校对工具",
-  "version": "4.1.0",
+  "version": "4.5.0",
   "author": "JerryHOEI",
   "description": "检查 RPG Maker 翻译文本、辞典、标点和格式。",
   "runtime": "host_python",
@@ -22,6 +22,22 @@
           "source": "translated/translation_translated.json",
           "required": true,
           "label": "译文 JSON 文件"
+        },
+        {
+          "name": "character_dictionary",
+          "flag": "--initial-dictionary",
+          "type": "current_game_file",
+          "source": "character_dictionary.csv",
+          "required": false,
+          "label": "人物辞典"
+        },
+        {
+          "name": "entity_dictionary",
+          "flag": "--initial-dictionary",
+          "type": "current_game_file",
+          "source": "entity_dictionary.csv",
+          "required": false,
+          "label": "事物辞典"
         }
       ]
     },
@@ -44,6 +60,22 @@
           "source": "StringScripts",
           "required": true,
           "label": "译文 TXT 文件夹"
+        },
+        {
+          "name": "character_dictionary",
+          "flag": "--initial-dictionary",
+          "type": "current_game_file",
+          "source": "character_dictionary.csv",
+          "required": false,
+          "label": "人物辞典"
+        },
+        {
+          "name": "entity_dictionary",
+          "flag": "--initial-dictionary",
+          "type": "current_game_file",
+          "source": "entity_dictionary.csv",
+          "required": false,
+          "label": "事物辞典"
         }
       ]
     }

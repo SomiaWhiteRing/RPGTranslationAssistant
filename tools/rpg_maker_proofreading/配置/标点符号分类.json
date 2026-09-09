@@ -2,7 +2,7 @@
   {
     "symbol": "。",
     "category": "点号",
-    "description": "句号",
+    "description": "句号（中文/日文句点）",
     "peers": [
       "．",
       "."
@@ -20,10 +20,10 @@
   {
     "symbol": ".",
     "category": "点号",
-    "description": "英文句点",
+    "description": "英文句号（半角）",
     "peers": [
-      "．",
-      "。"
+      "。",
+      "．"
     ]
   },
   {
@@ -61,7 +61,7 @@
   {
     "symbol": "，",
     "category": "点号",
-    "description": "逗号（全角）",
+    "description": "逗号（中文全角）",
     "peers": [
       ",",
       "、"
@@ -79,7 +79,7 @@
   {
     "symbol": "、",
     "category": "点号",
-    "description": "顿号/日文读点",
+    "description": "顿号/日文読点",
     "peers": [
       "，",
       ","
@@ -119,28 +119,32 @@
   },
   {
     "symbol": "“",
-    "category": "引号",
-    "description": "中文左双引号",
+    "category": "标号",
+    "description": "左双引号（中文）",
     "peers": [
       "「",
       "『",
-      "\""
+      "\"",
+      "[",
+      "［"
     ]
   },
   {
     "symbol": "”",
-    "category": "引号",
-    "description": "中文右双引号",
+    "category": "标号",
+    "description": "右双引号（中文）",
     "peers": [
       "」",
       "』",
-      "\""
+      "\"",
+      "]",
+      "］"
     ]
   },
   {
     "symbol": "‘",
-    "category": "引号",
-    "description": "中文左单引号",
+    "category": "标号",
+    "description": "左单引号（中文）",
     "peers": [
       "'",
       "「"
@@ -148,8 +152,8 @@
   },
   {
     "symbol": "’",
-    "category": "引号",
-    "description": "中文右单引号",
+    "category": "标号",
+    "description": "右单引号（中文）",
     "peers": [
       "'",
       "」"
@@ -157,28 +161,32 @@
   },
   {
     "symbol": "「",
-    "category": "引号",
-    "description": "日文左钩括号",
+    "category": "标号",
+    "description": "左引号（日文鉤括弧）",
     "peers": [
       "“",
       "『",
-      "｢"
+      "\"",
+      "[",
+      "［"
     ]
   },
   {
     "symbol": "」",
-    "category": "引号",
-    "description": "日文右钩括号",
+    "category": "标号",
+    "description": "右引号（日文鉤括弧）",
     "peers": [
       "”",
       "』",
-      "｣"
+      "\"",
+      "]",
+      "］"
     ]
   },
   {
     "symbol": "『",
-    "category": "引号",
-    "description": "日文左双钩括号",
+    "category": "标号",
+    "description": "左双层日文引号",
     "peers": [
       "「",
       "“"
@@ -186,33 +194,17 @@
   },
   {
     "symbol": "』",
-    "category": "引号",
-    "description": "日文右双钩括号",
+    "category": "标号",
+    "description": "右双层日文引号",
     "peers": [
       "」",
       "”"
     ]
   },
   {
-    "symbol": "｢",
-    "category": "引号",
-    "description": "半角日文左钩括号",
-    "peers": [
-      "「"
-    ]
-  },
-  {
-    "symbol": "｣",
-    "category": "引号",
-    "description": "半角日文右钩括号",
-    "peers": [
-      "」"
-    ]
-  },
-  {
     "symbol": "\"",
-    "category": "引号",
-    "description": "半角双引号",
+    "category": "标号",
+    "description": "英文双引号",
     "peers": [
       "“",
       "”",
@@ -222,175 +214,171 @@
   },
   {
     "symbol": "'",
-    "category": "引号",
-    "description": "半角单引号",
+    "category": "标号",
+    "description": "英文单引号",
     "peers": [
       "‘",
       "’"
     ]
   },
   {
+    "symbol": "｢",
+    "category": "标号",
+    "description": "半角日文左引号",
+    "peers": [
+      "「",
+      "“"
+    ]
+  },
+  {
+    "symbol": "｣",
+    "category": "标号",
+    "description": "半角日文右引号",
+    "peers": [
+      "」",
+      "”"
+    ]
+  },
+  {
     "symbol": "（",
-    "category": "括号",
-    "description": "全角左圆括号",
+    "category": "标号",
+    "description": "左圆括号（全角）",
     "peers": [
       "("
     ]
   },
   {
     "symbol": "）",
-    "category": "括号",
-    "description": "全角右圆括号",
+    "category": "标号",
+    "description": "右圆括号（全角）",
     "peers": [
       ")"
     ]
   },
   {
     "symbol": "(",
-    "category": "括号",
-    "description": "半角左圆括号",
+    "category": "标号",
+    "description": "左圆括号（半角）",
     "peers": [
       "（"
     ]
   },
   {
     "symbol": ")",
-    "category": "括号",
-    "description": "半角右圆括号",
+    "category": "标号",
+    "description": "右圆括号（半角）",
     "peers": [
       "）"
     ]
   },
   {
-    "symbol": "［",
-    "category": "括号",
-    "description": "全角左方括号",
-    "peers": [
-      "[",
-      "【"
-    ]
-  },
-  {
-    "symbol": "］",
-    "category": "括号",
-    "description": "全角右方括号",
-    "peers": [
-      "]",
-      "】"
-    ]
-  },
-  {
     "symbol": "[",
-    "category": "括号",
-    "description": "半角左方括号",
+    "category": "标号",
+    "description": "左方括号/可替换为左引号",
     "peers": [
       "［",
-      "【"
+      "【",
+      "「",
+      "“"
     ]
   },
   {
     "symbol": "]",
-    "category": "括号",
-    "description": "半角右方括号",
+    "category": "标号",
+    "description": "右方括号/可替换为右引号",
     "peers": [
       "］",
-      "】"
+      "】",
+      "」",
+      "”"
+    ]
+  },
+  {
+    "symbol": "［",
+    "category": "标号",
+    "description": "左方括号（全角）",
+    "peers": [
+      "[",
+      "【",
+      "「",
+      "“"
+    ]
+  },
+  {
+    "symbol": "］",
+    "category": "标号",
+    "description": "右方括号（全角）",
+    "peers": [
+      "]",
+      "】",
+      "」",
+      "”"
     ]
   },
   {
     "symbol": "【",
-    "category": "括号",
-    "description": "左方头括号",
+    "category": "标号",
+    "description": "左墨鱼括号",
     "peers": [
-      "［",
-      "["
+      "[",
+      "［"
     ]
   },
   {
     "symbol": "】",
-    "category": "括号",
-    "description": "右方头括号",
+    "category": "标号",
+    "description": "右墨鱼括号",
     "peers": [
-      "］",
-      "]"
-    ]
-  },
-  {
-    "symbol": "｛",
-    "category": "括号",
-    "description": "全角左花括号",
-    "peers": [
-      "{"
-    ]
-  },
-  {
-    "symbol": "｝",
-    "category": "括号",
-    "description": "全角右花括号",
-    "peers": [
-      "}"
+      "]",
+      "］"
     ]
   },
   {
     "symbol": "{",
-    "category": "括号",
-    "description": "半角左花括号",
+    "category": "标号",
+    "description": "左花括号（半角）",
     "peers": [
       "｛"
     ]
   },
   {
     "symbol": "}",
-    "category": "括号",
-    "description": "半角右花括号",
+    "category": "标号",
+    "description": "右花括号（半角）",
     "peers": [
       "｝"
     ]
   },
   {
-    "symbol": "《",
-    "category": "书名号",
-    "description": "左双书名号",
+    "symbol": "｛",
+    "category": "标号",
+    "description": "左花括号（全角）",
     "peers": [
-      "〈"
+      "{"
     ]
   },
   {
-    "symbol": "》",
-    "category": "书名号",
-    "description": "右双书名号",
+    "symbol": "｝",
+    "category": "标号",
+    "description": "右花括号（全角）",
     "peers": [
-      "〉"
-    ]
-  },
-  {
-    "symbol": "〈",
-    "category": "书名号",
-    "description": "左单书名号",
-    "peers": [
-      "《"
-    ]
-  },
-  {
-    "symbol": "〉",
-    "category": "书名号",
-    "description": "右单书名号",
-    "peers": [
-      "》"
+      "}"
     ]
   },
   {
     "symbol": "——",
-    "category": "破折/连接",
-    "description": "中文破折号",
+    "category": "标号",
+    "description": "破折号（双）",
     "peers": [
-      "—"
+      "—",
+      "－",
+      "-"
     ]
   },
   {
     "symbol": "—",
-    "category": "破折/连接",
-    "description": "长横线/连接号",
+    "category": "标号",
+    "description": "连接号/破折号（单）",
     "peers": [
       "——",
       "－",
@@ -399,232 +387,135 @@
   },
   {
     "symbol": "－",
-    "category": "破折/连接",
-    "description": "全角连字符",
+    "category": "标号",
+    "description": "全角连接号",
     "peers": [
-      "-",
-      "—"
+      "—",
+      "-"
     ]
   },
   {
     "symbol": "-",
-    "category": "破折/连接",
+    "category": "标号",
     "description": "半角连字符",
     "peers": [
-      "－",
-      "—"
-    ]
-  },
-  {
-    "symbol": "―",
-    "category": "破折/连接",
-    "description": "水平横线",
-    "peers": [
       "—",
-      "——"
+      "－"
     ]
   },
   {
     "symbol": "……",
-    "category": "省略/间隔",
+    "category": "标号",
     "description": "双省略号",
     "peers": [
-      "…"
+      "…",
+      "...",
+      "・・・・・・"
     ]
   },
   {
     "symbol": "…",
-    "category": "省略/间隔",
+    "category": "标号",
     "description": "单省略号",
     "peers": [
-      "……"
+      "……",
+      "..."
+    ]
+  },
+  {
+    "symbol": "《",
+    "category": "标号",
+    "description": "左书名号",
+    "peers": [
+      "〈"
+    ]
+  },
+  {
+    "symbol": "》",
+    "category": "标号",
+    "description": "右书名号",
+    "peers": [
+      "〉"
+    ]
+  },
+  {
+    "symbol": "〈",
+    "category": "标号",
+    "description": "左单书名号",
+    "peers": [
+      "《"
+    ]
+  },
+  {
+    "symbol": "〉",
+    "category": "标号",
+    "description": "右单书名号",
+    "peers": [
+      "》"
     ]
   },
   {
     "symbol": "·",
-    "category": "省略/间隔",
-    "description": "间隔号",
+    "category": "标号",
+    "description": "间隔号（中文）",
     "peers": [
       "・"
     ]
   },
   {
     "symbol": "・",
-    "category": "省略/间隔",
-    "description": "日文中点",
+    "category": "标号",
+    "description": "间隔号（日文）",
     "peers": [
       "·"
     ]
   },
   {
-    "symbol": "/",
-    "category": "分隔",
-    "description": "半角分隔号",
+    "symbol": "_",
+    "category": "标号",
+    "description": "下划线/专名号组成字符",
     "peers": [
-      "／"
-    ]
-  },
-  {
-    "symbol": "／",
-    "category": "分隔",
-    "description": "全角分隔号",
-    "peers": [
-      "/"
-    ]
-  },
-  {
-    "symbol": "\\",
-    "category": "分隔",
-    "description": "反斜杠",
-    "peers": [
-      "＼"
-    ]
-  },
-  {
-    "symbol": "＼",
-    "category": "分隔",
-    "description": "全角反斜杠",
-    "peers": [
-      "\\"
+      "＿"
     ]
   },
   {
     "symbol": "＿",
-    "category": "其他标号",
+    "category": "标号",
     "description": "全角下划线",
     "peers": [
       "_"
     ]
   },
   {
-    "symbol": "_",
-    "category": "其他标号",
-    "description": "半角下划线",
+    "symbol": "/",
+    "category": "标号",
+    "description": "分隔号（半角）",
     "peers": [
-      "＿"
+      "／"
     ]
   },
   {
-    "symbol": "〜",
-    "category": "其他标号",
-    "description": "波浪号",
+    "symbol": "／",
+    "category": "标号",
+    "description": "分隔号（全角）",
     "peers": [
-      "～",
-      "~"
+      "/"
     ]
   },
   {
-    "symbol": "～",
-    "category": "其他标号",
-    "description": "全角波浪号",
+    "symbol": "\\",
+    "category": "标号",
+    "description": "反斜杠（注意：RPG Maker 控制符前缀）",
     "peers": [
-      "〜",
-      "~"
+      "＼"
     ]
   },
   {
-    "symbol": "~",
-    "category": "其他标号",
-    "description": "半角波浪号",
+    "symbol": "＼",
+    "category": "标号",
+    "description": "全角反斜杠",
     "peers": [
-      "～",
-      "〜"
-    ]
-  },
-  {
-    "symbol": "＝",
-    "category": "其他标号",
-    "description": "全角等号",
-    "peers": [
-      "="
-    ]
-  },
-  {
-    "symbol": "=",
-    "category": "其他标号",
-    "description": "半角等号",
-    "peers": [
-      "＝"
-    ]
-  },
-  {
-    "symbol": "＋",
-    "category": "其他标号",
-    "description": "全角加号",
-    "peers": [
-      "+"
-    ]
-  },
-  {
-    "symbol": "+",
-    "category": "其他标号",
-    "description": "半角加号",
-    "peers": [
-      "＋"
-    ]
-  },
-  {
-    "symbol": "％",
-    "category": "其他标号",
-    "description": "全角百分号",
-    "peers": [
-      "%"
-    ]
-  },
-  {
-    "symbol": "%",
-    "category": "其他标号",
-    "description": "半角百分号",
-    "peers": [
-      "％"
-    ]
-  },
-  {
-    "symbol": "＆",
-    "category": "其他标号",
-    "description": "全角和号",
-    "peers": [
-      "&"
-    ]
-  },
-  {
-    "symbol": "&",
-    "category": "其他标号",
-    "description": "半角和号",
-    "peers": [
-      "＆"
-    ]
-  },
-  {
-    "symbol": "＠",
-    "category": "其他标号",
-    "description": "全角at符号",
-    "peers": [
-      "@"
-    ]
-  },
-  {
-    "symbol": "@",
-    "category": "其他标号",
-    "description": "半角at符号",
-    "peers": [
-      "＠"
-    ]
-  },
-  {
-    "symbol": "＃",
-    "category": "其他标号",
-    "description": "全角井号",
-    "peers": [
-      "#"
-    ]
-  },
-  {
-    "symbol": "#",
-    "category": "其他标号",
-    "description": "半角井号",
-    "peers": [
-      "＃"
+      "\\"
     ]
   }
 ]
